@@ -251,6 +251,7 @@ class Glagol:
         self.updated = 0.0
         self.error = None
         self.waiters = {}
+        self.state_callbacks = []  # observers only enqueue snapshots; no control calls here
         self.wake = threading.Event()
         threading.Thread(target=self._run, daemon=True, name="glagol").start()
 
@@ -299,6 +300,11 @@ class Glagol:
                     if msg:
                         if "state" in msg:
                             self.state, self.updated = msg["state"], time.time()
+                            for callback in tuple(self.state_callbacks):
+                                try:
+                                    callback(self.state, self.updated)
+                                except Exception:
+                                    pass  # an observer must not disconnect Glagol
                         rid = msg.get("requestId")
                         if rid in self.waiters:
                             self.waiters[rid]["resp"] = msg

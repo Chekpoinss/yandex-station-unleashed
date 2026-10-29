@@ -1,8 +1,8 @@
-import * as THREE from 'three';
-import { STLLoader } from './vendor/three/STLLoader.js';
-import { OrbitControls } from './vendor/three/OrbitControls.js';
+import * as THREE from './vendor/three/three.module.js';
+import { STLLoader } from './vendor/three/STLLoader.js?v=020-model3';
+import { OrbitControls } from './vendor/three/OrbitControls.js?v=020-model3';
 import {modelSettings} from './model-settings.js';
-import { toCreasedNormals } from './vendor/three/BufferGeometryUtils.js';
+import { toCreasedNormals } from './vendor/three/BufferGeometryUtils.js?v=020-model3';
 
 // Цвета корпусов (yandex-getcolor) — на глаз по фото.
 const BODY_COLORS = { copper: '#a8603e', black: '#2c2c31', blue: '#3e5f90', green: '#56715f', pink: '#d8a4a9', violet: '#6e5b98' };

@@ -15,11 +15,10 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/$NAME/runtime/python" "$OUT"
 cd "$ROOT"
 cp -r server.py access.py glagol.py profiles.py managed_yam.py multi.py speakers.example.json VERSION static device start.bat LICENSE README.md CONTRIBUTION.md "$WORK/$NAME/"
-# помощник для колонки (linux/arm64): на Windows Go обычно нет, поэтому кладём готовую сборку
-rm -rf "$WORK/$NAME/device/assistant/build"
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go -C device/assistant build -trimpath -ldflags "-s -w -X main.version=$VER" \
-  -o "$WORK/$NAME/device/assistant/build/assistantd" .
-echo "$VER" > "$WORK/$NAME/device/assistant/build/VERSION"
+cp pyadb.py alarm_intent.py alarm_music.py audio_stream.py light_profiles.py music_artwork.py music_library.py music_lights.py music_metadata.py music_spectrum.py native_alarms.py playback_order.py voice_bridge.py voice_catalog.py voice_events.py yandex_library.py panel_journal.py panel_scenes.py graph_scenes.py native_scenes.py animation_library.py ring_animations.py sound_overrides.py requirements-local.txt "$WORK/$NAME/"
+python -m pip download --only-binary=:all: --no-deps -r requirements-local.txt -d "$WORK/wheels"
+mkdir -p "$WORK/$NAME/runtime/packages"
+for wheel in "$WORK"/wheels/*.whl; do unzip -qo "$wheel" -d "$WORK/$NAME/runtime/packages"; done
 curl -fsSL -o "$WORK/python.zip" "https://www.python.org/ftp/python/$PYVER/python-$PYVER-embed-$ARCH.zip"
 unzip -q "$WORK/python.zip" -d "$WORK/$NAME/runtime/python"
 # портативный Python не видит папку скрипта — добавляем корень панели (путь относительно ._pth)

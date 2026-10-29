@@ -1,0 +1,4 @@
+# Dependencies already used by this local fork; no ML stack is required.
+mutagen==1.48.1
+yt-dlp==2026.10.26
+tzdata==2026.5

@@ -19,19 +19,12 @@ jobs:
         if: github.ref_type == 'tag'
         run: |
           test "${GITHUB_REF_NAME#v}" = "$(cat VERSION)" || { echo "метка $GITHUB_REF_NAME, а в VERSION $(cat VERSION)"; exit 1; }
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: device/assistant/go.mod
       - name: Сборка
         run: |
           VER="${GITHUB_REF_NAME#v}"
           [ "$GITHUB_REF_TYPE" = tag ] || VER="dev-${GITHUB_SHA::7}"
           .github/build-windows-zip.sh "$VER" amd64 dist
           .github/build-windows-zip.sh "$VER" arm64 dist
-          # программа помощника для колонки: панель без Go скачивает её с релиза и сверяет SHA256SUMS
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go -C device/assistant build -trimpath \
-            -ldflags "-s -w -X main.version=$VER" -o "$PWD/dist/assistantd-linux-arm64" .
-          (cd dist && sha256sum assistantd-linux-arm64 > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -41,11 +34,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/assistantd-linux-arm64 dist/SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes --notes "$(cat <<'NOTES'
+          gh release create "$GITHUB_REF_NAME" dist/*.zip --title "$GITHUB_REF_NAME" --generate-notes --notes "$(cat <<'NOTES'
           **Windows:** скачайте `…-windows-x64.zip` (или `arm64` для ARM-ноутбуков), распакуйте и запустите `start.bat`.
           Python уже внутри; adb (и по желанию ffmpeg) `start.bat` скачает сам при первом запуске.
-
-          **Android:** `yandex-station-web-….apk` — панель целиком в приложении (Android 7+, 64 бита), колонка — по Wi-Fi.
 
           **Linux / macOS / Docker:** см. README.
           NOTES

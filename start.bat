@@ -41,13 +41,9 @@ if defined ADB if exist "%ADB%" goto ffmpeg
 set "ADB="
 if exist "%~dp0platform-tools\adb.exe" set "ADB=%~dp0platform-tools\adb.exe"
 if not defined ADB if exist "%RT%\platform-tools\adb.exe" set "ADB=%RT%\platform-tools\adb.exe"
+if not defined ADB if exist "%USERPROFILE%\platform-tools\adb.exe" set "ADB=%USERPROFILE%\platform-tools\adb.exe"
 if not defined ADB for /f "delims=" %%i in ('where adb 2^>nul') do if not defined ADB set "ADB=%%i"
-if not defined ADB goto adbask
-rem старый adb (например, 1.0.31) не понимает pull -a и forward tcp:0 — предлагаем скачать свежий
-"%PYEXE%" -c "import re,subprocess,sys;o=subprocess.run([sys.argv[1],'version'],capture_output=True,text=True).stdout;m=re.search(r'version (\d+)\.(\d+)\.(\d+)',o);sys.exit(m is not None and tuple(map(int,m.groups()))<(1,0,39))" "%ADB%"
-if errorlevel 1 echo. & echo Найден слишком старый adb: %ADB% & echo Панели нужен Android platform-tools 28 или новее. & set "ADB="
 if defined ADB goto ffmpeg
-:adbask
 echo.
 echo adb не найден. Можно скачать Android platform-tools с сайта Google (около 7 МБ) в папку runtime.
 echo Условия Google: https://developer.android.com/tools/releases/platform-tools
@@ -61,6 +57,7 @@ set "ADB=%RT%\platform-tools\adb.exe"
 
 :ffmpeg
 rem ---------- ffmpeg (по желанию: mp3/ogg и свои звуки) ----------
+if exist "%RT%\ffmpeg.exe" set "PATH=%RT%;%PATH%"
 if exist "%RT%\ffmpeg\bin\ffmpeg.exe" set "PATH=%RT%\ffmpeg\bin;%PATH%"
 where ffmpeg >nul 2>nul && goto run
 if exist "%RT%\no-ffmpeg" goto run

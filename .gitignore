@@ -3,9 +3,6 @@
 .panel_auth.json
 .panel_settings.json
 .metrics.json
-.radio_alice.json
-.radio_logos
-.radio_checks.json
 .tls/
 data/
 speakers.json
@@ -19,11 +16,27 @@ platform-tools/
 .vscode/
 runtime/
 dist/
+# Personal music files, tags and artwork
+music-data/
 
-# сборка помощника для колонки (панель собирает её сама, если есть Go)
-device/assistant/build/
-.assistantd-*
-
-# локальные настройки Command Code
-.commandcode/
 .panel_journal.jsonl
+.panel_journal.tmp
+sound-backups/
+.panel_scenes.json
+.panel_scenes.tmp
+
+# Personal launchers contain the selected speaker address
+open-my-panel*.cmd
+
+.panel_graph_scenes.json
+.panel_graph_scenes.tmp
+animations/
+animation-backups/
+.assistantd-*
+.radio_checks.json
+.radio_alice.json
+.radio_logos/
+device/assistant/build/
+
+.native_scene_receipts.json
+.native_scene_receipts.tmp

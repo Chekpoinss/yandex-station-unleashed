@@ -6,30 +6,20 @@
 # alarms.conf, по строке на будильник (пишет панель):
 #   id|вкл|ЧЧ:ММ|дни|режим|запрос|файл звука|название звука|громкость 1–10|нарастание, с|выкл. через, мин|отложить, мин|подпись
 # дни — цифры 1–7 (пн–вс), пусто — один раз; режим: sound | wave | show | music | text.
-#
-# scenes.conf — сценарии (пишет панель). Сценарий — граф нод: строка S на сценарий, строки N — ноды:
-#   S|id|вкл|повод|ЧЧ:ММ|дни|первая нода|название      повод: time — по времени, boot — после включения,
-#                                                       manual — только вручную (панель, нода «Другой сценарий»),
-#                                                       voice — по команде ассистенту (вместо времени — фразы
-#                                                       через запятую; ищет и запускает их сам ассистент)
-#   N|id|нода|вид|арг1|арг2|дальше|иначе|x|y            x, y — место ноды в редакторе, демону не нужны
-# Виды: query/say/ask текст, vol 0–10 нарастание_с, sound файл, ring RRGGBB секунд, wait секунд,
-# wait_until ЧЧ:ММ, wait_quiet до_секунд, stop, scene id, anim ring:имя|clock:имя секунд, assistant on|off,
-# if проверка аргумент, repeat раз, note (не выполняется). Анимацию часов панель кладёт готовым скриптом anim_<имя>.sh.
-# У if и repeat два выхода: «дальше» — да / ещё круг, «иначе» — нет / круги кончились.
-# Тексты — только данные: ноду выполняет case ниже, через eval/sh -c они не проходят.
 
 D=/data/quasar/webpanel/alarm
+SCENES=$D/scenes.conf
+SFIRE=/tmp/webpanel_scene.fire
+SRUN=/tmp/webpanel_scene.
 CONF=$D/alarms.conf
 LAST=$D/last_fired
 SNOOZE=$D/snooze
+CONF_LOCK=$D/config.lock
+ONCE_GC=$D/completed_once
 LOG=$D/alarm.log
 STATE=/tmp/webpanel_alarm.state
 CMD=/tmp/webpanel_alarm.cmd
 FIRE=/tmp/webpanel_alarm.fire
-SCENES=$D/scenes.conf
-SFIRE=/tmp/webpanel_scene.fire       # «запустить сейчас» из панели: id сценария
-SRUN=/tmp/webpanel_scene.            # SRUN<id> — pid идущего сценария (панель останавливает по нему)
 MLOG=/data/quasar/daemons_logs/maind.log
 Q=/system/vendor/quasar
 [ -f $D/localtime ] && export TZ=:$D/localtime
@@ -38,6 +28,48 @@ RING_LEDS="red:ring1 green:ring1 blue:ring1 red:ring2 green:ring2 blue:ring2 red
 log() {
     echo "$(date '+%d.%m %H:%M:%S') $*" >> $LOG
     [ "$(wc -c < $LOG)" -gt 30000 ] && tail -n 150 $LOG > $LOG.t && mv $LOG.t $LOG
+}
+
+# Serialize cleanup with the panel's atomic config replacement. The kernel
+# releases flock even after a killed process; stale PID locks cannot block alarms.
+conf_lock() {
+    exec 9>"$CONF_LOCK" || return 1
+    tries=0
+    while ! flock -xn 9; do
+        tries=$((tries + 1))
+        [ "$tries" -ge 50 ] && { exec 9>&-; return 1; }
+        sleep 0.1
+    done
+}
+conf_unlock() { flock -u 9; exec 9>&-; }
+
+# A scheduled one-shot is disabled before it rings. Keep its row during snooze;
+# a manual test (still enabled) or a recurring alarm must never be deleted.
+remove_completed_once() {
+    conf_lock || return 1
+    if [ -f "$SNOOZE" ]; then
+        IFS='|' read -r snooze_at snooze_id < "$SNOOZE"
+        [ "$snooze_id" = "$1" ] && { conf_unlock; return 1; }
+    fi
+    result=0
+    if [ -f "$CONF" ]; then
+        tmp="$CONF.gc.$$"
+        awk -F '|' -v id="$1" '!($1 == id && $2 == "0" && $4 == "")' "$CONF" > "$tmp" &&
+            mv "$tmp" "$CONF" || result=1
+        rm -f "$tmp"
+    fi
+    conf_unlock
+    return "$result"
+}
+
+retry_completed_once() {
+    [ -f "$ONCE_GC" ] || return 0
+    pending="$ONCE_GC.$$"
+    mv "$ONCE_GC" "$pending" || return 0
+    while IFS= read -r completed; do
+        remove_completed_once "$completed" || printf '%s\n' "$completed" >> "$ONCE_GC"
+    done < "$pending"
+    rm -f "$pending"
 }
 
 # Громкость Алисы 0–10 → значение ALSA Master (как platformToAlsaMap у Quasar: 0→0, 1→49, 20→255).
@@ -65,7 +97,6 @@ alice() {
 }
 
 # Кольцо — через framebuffer, как у самого Quasar; после будильника возвращаем его Quasar.
-# Только если /dev/fb0 — кольцо Лайт 2 (3 пикселя): на других моделях там может быть экран.
 FB_RING=; [ "$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null)" = "3,1" ] && FB_RING=1
 ring() { [ -n "$FB_RING" ] && echo -e -n "$1$1$1" > /dev/fb0 2>/dev/null; }
 ring_release() {
@@ -89,7 +120,7 @@ wait_alice() {
 }
 
 fire() {
-    id=$1 mode=$2 query=$3 sound=$4 vol=$5 ramp=$6 dur=$7 snz=$8
+    id=$1 mode=$2 query=$3 sound=$4 vol=$5 ramp=0 dur=$7 snz=$8
     rm -f $CMD
     orig=$(get_alsa)
     target=$(alsa_of $vol)
@@ -165,6 +196,9 @@ fire() {
     fi
     rm -f $CMD
     echo "idle" > $STATE
+    if [ "$why" != snooze ] || [ "$snz" -le 0 ]; then
+        remove_completed_once "$id" || printf '%s\n' "$id" >> "$ONCE_GC"
+    fi
 }
 
 # ---------- сценарии ----------
@@ -178,7 +212,7 @@ mins() { h=${1%:*} m=${1#*:}; echo $(( ${h#0} * 60 + ${m#0} )); }
 
 # Спросить своего ассистента (device/assistant) и дождаться, пока он ответит.
 ask() {
-    [ -f /tmp/webpanel_assistant.json ] || { slog "ассистент не запущен — «$1» пропущен"; return; }
+    [ -f /tmp/webpanel_assistant.json ] || { slog "ассистент не запущен — шаг пропущен"; return; }
     printf '{"ask":"%s"}\n' "$1" > /tmp/webpanel_assistant.cmd.new && mv /tmp/webpanel_assistant.cmd.new /tmp/webpanel_assistant.cmd
     sleep 3
     i=0; while ! grep -q '"state":"idle"' /tmp/webpanel_assistant.json && [ $i -lt 180 ]; do sleep 1; i=$((i + 1)); done
@@ -200,44 +234,52 @@ check() {
 }
 
 # Нода: 0 — идти по «дальше», иначе — по «иначе».
+scene_sleep() {
+    sleep "$1" & sp=$!
+    wait "$sp"; result=$?; sp=
+    return "$result"
+}
 node() {
     kind=$1 a=$2 b=$3 sid=$4 nid=$5
+    [ "$kind" != stop ] || { kind=music; a=stop; b=; }
+    ap=
     case $kind in
-        query) alice "$a" ;;
+        query|music)
+            req="$SRUN$sid.request"
+            nonce=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n'); printf '%s|%s|%s|%s|%s\n' "$sid" "$kind" "$a" "$b" "$nonce" > "$req.new" && mv "$req.new" "$req"
+            i=0; while [ -f "$req" ] && [ $i -lt 30 ]; do scene_sleep 1; i=$((i + 1)); done
+            [ -f "$req" ] && { rm -f "$req"; slog "$sid: нет связи с общим плеером ПК"; return 1; }
+            result=$(cat "$req.result" 2>/dev/null); rm -f "$req.result"
+            [ "$result" = 0 ] || { slog "$sid: общий плеер сообщил об ошибке"; return 1; } ;;
         say) alice "Повтори за мной: $a" ;;
         ask) ask "$a" ;;
         assistant)   # режим ассистента: все вопросы к Алисе уходят своей модели
             [ -f /tmp/webpanel_assistant.json ] || { slog "ассистент не запущен — режим не переключён"; return 0; }
             m=false; [ "$a" = on ] && m=true
             printf '{"mode":%s}\n' $m > /tmp/webpanel_assistant.cmd.new && mv /tmp/webpanel_assistant.cmd.new /tmp/webpanel_assistant.cmd ;;
-        vol)
-            # плавно — через микшер, а в конце говорим Алисе ту же громкость, чтобы она знала о ней
-            if [ "${b:-0}" -gt 0 ]; then
-                from=$(get_alsa) to=$(alsa_of "$a") t=0
-                while [ $t -lt "$b" ]; do set_alsa $((from + (to - from) * t / b)); sleep 1; t=$((t + 1)); done
-            fi
-            alice "громкость $a" ;;
-        sound) [ -f "$D/$a" ] && aplay -q "$D/$a" 2>/dev/null ;;
+        vol) alice "громкость $a" ;;
+        sound) if [ -f "$D/$a" ]; then aplay -q "$D/$a" 2>/dev/null & ap=$!; wait "$ap"; ap=; fi ;;
         ring)
             c=$a; r=${c%????} g=${c#??}; g=${g%??}; bl=${c#????}
-            ring "\\x$bl\\x$g\\x$r"; sleep "${b:-5}"; ring_release ;;
-        wait) sleep "${a:-1}" ;;
+            ring "\\x$bl\\x$g\\x$r"; scene_sleep "${b:-5}"; ring_release ;;
+        wait) scene_sleep "${a:-1}" ;;
         wait_until)
             s=$(( $(mins "$a") * 60 - $(mins "$(date +%H:%M)") * 60 - $(date +%S | sed 's/^0//') ))
-            [ $s -le 0 ] && s=$((s + 86400)); sleep $s ;;
-        wait_quiet) i=0; while playing && [ $i -lt "${a:-600}" ]; do sleep 1; i=$((i + 1)); done ;;
-        stop) alice "стоп" ;;
-        scene) ( run_scene "$a" ) ;;
+            [ $s -le 0 ] && s=$((s + 86400)); scene_sleep $s ;;
+        wait_quiet) i=0; while playing && [ $i -lt "${a:-600}" ]; do scene_sleep 1; i=$((i + 1)); done ;;
+        scene)
+            ( child=; trap '[ -z "$child" ] || kill "$child" 2>/dev/null; exit 143' TERM INT; run_scene "$a"; child=$(cat "$SRUN$a" 2>/dev/null); [ -z "$child" ] || wait "$child" ) & sp=$!
+            wait "$sp"; sp= ;;
         anim)
             # предустановленная анимация на «секунд» b: кольцо — штатным led_util, часы — скриптом от панели
             ap=   # ap пишет и alice() — не убить бы чужой pid
             # своя анимация — «my/имя»: лежит в webpanel/anims, а не в Quasar; скрипт часов — с «~» вместо «/»
             case $a in
                 ring:my/*) LD_LIBRARY_PATH=$Q/libs $Q/led_util "/data/quasar/webpanel/anims/ring/${a#ring:my/}" >/dev/null 2>&1 & ap=$! ;;
-                ring:*) LD_LIBRARY_PATH=$Q/libs $Q/led_util "$Q/ledpatterns/oknix/${a#ring:}" >/dev/null 2>&1 & ap=$! ;;
+                ring:*) LD_LIBRARY_PATH=$Q/libs $Q/led_util "$Q/ledpatterns/${a#ring:}" >/dev/null 2>&1 & ap=$! ;;
                 clock:*) f="$D/anim_$(echo "${a#clock:}" | tr / '~').sh"; [ -f "$f" ] && { sh "$f" & ap=$!; } ;;
             esac
-            if [ -n "$ap" ]; then sleep "${b:-5}"; kill $ap 2>/dev/null; ap=; fi
+            if [ -n "$ap" ]; then scene_sleep "${b:-5}"; kill $ap 2>/dev/null; ap=; fi
             case $a in ring:*) ring_release ;; esac ;;
         if) check "$a" "$b"; return ;;
         repeat)
@@ -256,9 +298,13 @@ run_scene() {
 $line
 EOF
     # ноды — в файл, а цикл — в одной подоболочке: панель останавливает сценарий одним kill по её pid
+    mkdir /tmp/webpanel_scene.$id.lock 2>/dev/null || return 0
     grep "^N|$id|" $SCENES > $SRUN$id.nodes
     (
-        slog "«$name»: начат"
+        touch /tmp/webpanel_scene.$id.active
+        trap '[ -z "$ap" ] || kill "$ap" 2>/dev/null; [ -z "$sp" ] || kill "$sp" 2>/dev/null; rm -f /tmp/webpanel_scene.$id.active $SRUN$id $SRUN$id.nodes $SRUN$id.c* $SRUN$id.v* $SRUN$id.request $SRUN$id.request.result; rmdir /tmp/webpanel_scene.$id.lock 2>/dev/null' 0
+        trap 'exit 143' TERM INT
+        slog "$id: начат"
         # Защита от зацикливания: каждая нода — не больше 20 раз за запуск (у «Повтора» свой счёт, до 20 кругов).
         # Счёт — в файлах: переменные с номером ноды в имени потребовали бы eval.
         pc=$start
@@ -270,12 +316,12 @@ $l
 EOF
             if [ "$kind" != repeat ]; then
                 v=$(cat $SRUN$id.v$pc 2>/dev/null || echo 0)
-                if [ "$v" -ge 20 ]; then slog "«$name»: остановлен — нода $pc прошла 20 раз, похоже, цикл без выхода"; break; fi
+                if [ "$v" -ge 20 ]; then slog "$id: остановлен — нода $pc прошла 20 раз, похоже, цикл без выхода"; break; fi
                 echo $((v + 1)) > $SRUN$id.v$pc
             fi
             if node "$kind" "$a" "$b" "$id" "$pc" < /dev/null; then pc=$nx; else pc=$el; fi
         done
-        slog "«$name»: готово"
+        slog "$id: готово"
         rm -f $SRUN$id $SRUN$id.nodes $SRUN$id.c* $SRUN$id.v*
     ) < /dev/null &
     echo $! > $SRUN$id
@@ -283,6 +329,7 @@ EOF
 
 check_scenes() {
     [ -f $SCENES ] || return
+    conf_lock || return
     due=
     while IFS='|' read -r t id on trig tm days rest; do
         [ "$t" = S ] && [ "$on" = 1 ] && [ "$trig" = time ] && [ "$tm" = "$now" ] || continue
@@ -292,6 +339,7 @@ check_scenes() {
         [ -z "$days" ] && sed -i "s/^S|$id|1|/S|$id|0|/" $SCENES
         due="$due $id"
     done < $SCENES
+    conf_unlock
     for id in $due; do run_scene "$id"; done
 }
 
@@ -309,6 +357,7 @@ boot_scenes() {
     ) < /dev/null &
 }
 
+
 # Строка конфига → fire
 run_id() {
     line=$(grep "^$1|" $CONF 2>/dev/null | head -n 1)
@@ -320,13 +369,15 @@ EOF
 }
 
 check_minute() {
+    retry_completed_once
     now=$(date +%H:%M) dow=$(date +%u) stamp=$(date +%Y%m%d%H%M) ep=$(date +%s)
     if [ -f $SNOOZE ]; then
         IFS='|' read -r sat sid < $SNOOZE
         if [ "$ep" -ge "${sat:-0}" ]; then rm -f $SNOOZE; run_id "$sid"; fi
     fi
     check_scenes
-    [ -f $CONF ] || return
+    conf_lock || return
+    [ -f $CONF ] || { conf_unlock; return; }
     due=
     while IFS='|' read -r id on tm days mode rest; do
         [ "$on" = 1 ] && [ "$tm" = "$now" ] || continue
@@ -336,12 +387,28 @@ check_minute() {
         [ -z "$days" ] && sed -i "s/^$id|1|/$id|0|/" $CONF
         due="$due $id"
     done < $CONF
+    conf_unlock
     [ -f $LAST ] && tail -n 50 $LAST > $LAST.t && mv $LAST.t $LAST
     for id in $due; do run_id "$id"; done
 }
 
 echo idle > $STATE
 log "запущен, время на колонке $(date '+%H:%M %Z')"
+# Services explicitly enabled by the panel. Reuse the existing /data daemon entry;
+# never create or edit a system init script.
+start_panel_modules() {
+    for flag in /data/quasar/webpanel/yam2/boot/*; do
+        [ -f "$flag" ] || continue
+        sid=${flag##*/}; case "$sid" in *[!a-z0-9._~-]*|'') continue;; esac
+        script=/data/quasar/webpanel/yam2/$sid.sh
+        [ -f "$script" ] || continue
+        pid=/tmp/webpanel_yam2_$sid.pid
+        p=$(cat "$pid" 2>/dev/null)
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && continue
+        start-stop-daemon -S -b -m -p "$pid" -x /bin/sh -- "$script"
+    done
+}
+start_panel_modules
 boot_scenes
 while :; do
     check_minute
@@ -349,13 +416,8 @@ while :; do
     s=$(date +%S); s=${s#0}
     i=$((60 - s))
     while [ $i -gt 0 ]; do
+        if [ -f $SFIRE ]; then sid=$(cat $SFIRE); rm -f $SFIRE; case "$sid" in ""|*[!a-z0-9]*) ;; *) run_scene "$sid";; esac; fi
         if [ -f $FIRE ]; then id=$(cat $FIRE); rm -f $FIRE; log "$id: проверка из панели"; run_id "$id"; break; fi
-        # «id» — кнопка в панели, «id voice» — команда ассистенту
-        if [ -f $SFIRE ]; then
-            read -r id src < $SFIRE; rm -f $SFIRE
-            if [ "$src" = voice ]; then slog "запуск по команде ассистенту"; else slog "запуск из панели"; fi
-            run_scene "$id"
-        fi
         sleep 1; i=$((i - 1))
     done
 done

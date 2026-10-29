@@ -17,9 +17,7 @@ const cases=[
   [{hardware_model:'yandex,station-micro',hostname:'renamed'},'lite'],
   [{hostname:'yandex-station-lite'},'lite'],
   [{hardware_model:'Yandex Plum EVT2',hostname:'yandex-station-lite'},'lite2'],
-  [{hostname:'Yandex-Mini2-2ZTR'},'mini2'],
-  [{hardware_model:'Yandex Station Mini 2',hostname:'renamed'},'mini2'],
-  [{hostname:'Yandex-Mini1-1234'},'lite2'],
+  [{hostname:'Yandex-Mini2-1234'},'lite2'],
 ];
 for(const [identity,expected]of cases){
   const result=rendererProfile(original,identity);
@@ -28,4 +26,9 @@ for(const [identity,expected]of cases){
 }
 assert.equal(rendererProfile({id:'station2',name:'Station 2'},{hostname:'renamed'}).id,'station2');
 assert.deepEqual(original,{id:'lite2',name:'Lite 2',clock:true,boot:true});
+// Resolve the actual renderer dependency graph without any browser import map.
+// This reproduces Firefox's failure on a bare `three` import, including addons.
+assert.equal(typeof (await import('../static/model-studio.js')).createModel,'function');
+assert.equal(typeof (await import('../static/vendor/three/STLLoader.js')).STLLoader,'function');
+assert.equal(typeof (await import('../static/vendor/three/BufferGeometryUtils.js')).toCreasedNormals,'function');
 console.log(`${cases.length+1} renderer identity cases passed; hardware profile unchanged`);

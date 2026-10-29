@@ -8,28 +8,6 @@
 - Station 2, Mini 3 Pro, Mini 3 and Station Lite (1st gen): original approximate visual reconstructions in
   model-studio.js (MIT), based on the manufacturer's public product photographs.
   They are not official CAD, downloaded commercial meshes, or manufacturing drawings.
-- Station Mini 2 with clock (YNDX-00020): original approximate reconstruction in model-studio.js (MIT)
-  from the owner's photographs and caliper measurements of a white unit, checked against the official
-  97 × 54 mm, 260 g specification
-  (https://alice.yandex.ru/support/ru/station/meet/characteristics-mini2). Four official colours:
-  white, black, red and blue. The clock display uses the panel's shared clock geometry
-  (`clock-geometry.js`): 4 × 7 segments, colon, hyphen and degree sign — 32 white LEDs, no decimal points.
-  The central Alice diffuser is driven by the native six RGB zones; their mean colour is an approximation.
-  The photographs are not bundled.
-
-- Gallery placeholders (Max, Station 3, Midi, Street, Duo Max, Station, Mini 2 without clock, Mini gen 1,
-  all TV Station models and Drops): simplified original shapes in model-concepts.js (MIT) after the
-  manufacturer's public photographs. They only help future contributors start; hardware support is not implied.
-  Lite 2 without clock reuses lite2.stl with the display off.
-  Dimensions, colours and visible features follow the official specification pages:
-  https://alice.yandex.ru/support/ru/station/meet/characteristics-max (141 x 141 x 231 mm),
-  characteristics-gen3 (132 x 132 x 201 mm), characteristics-midi (96 x 96 x 110 mm),
-  characteristics-street (83 mm diameter, 202 mm), characteristics-duo-max (256 x 118 x 240 mm),
-  characteristics-gen1 (141 x 141 x 231 mm), characteristics-mini2 (97 x 54 mm), characteristics-mini1 (90 x 45 mm).
-  TVs: https://alice.yandex.ru/support/ru/tv/specs/tv-station-led, tv-station-qled, tv-station-miniled,
-  tv-station-pro-miniled, tv-station-basic-led, tv-station-basic-qled (size with and without feet, feet spacing).
-  Photos: https://alice.yandex.ru/station-max, station-gen3, station-midi, station-street, station-duo-max, station-mini.
-  Drops: retailer photos (DNS) of the white 2026 case.
 
 References:
 - https://alice.yandex.ru/station-gen2
@@ -38,9 +16,7 @@ References:
 - https://alice.yandex.ru/station-lite
 
 Mini 3 has a lower 102 × 60.5 mm body and central indicator; Mini 3 Pro has a
-102 × 71 mm body and perimeter light strip. Mini 2 is a straight 97 × 54 mm fabric cylinder with a flat
-perforated top, a large clock behind the fabric on the side and six RGB LEDs behind the central Alice
-diffuser; four official colours are selectable in the model settings. Station Lite is an 88 mm puck on a ribbed
+102 × 71 mm body and perimeter light strip. Station Lite is an 88 mm puck on a ribbed
 black base; the edge slots are decorative, only the Alice logo in the centre lights up (no clock). Details and colours are approximate.
 Product photographs are not bundled or used as textures. All models use lightweight
 materials with no shadows, ground plane, bump mapping or physical materials. Lite 2

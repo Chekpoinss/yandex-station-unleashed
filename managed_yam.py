@@ -50,11 +50,9 @@ def install(s):
             self.adb.shell(f'test -x {service} && test -x {s.YAMD} && test -d {base}/data')
             before_plugins = self.yam_plugins()
             before_settings = self._yam('GET', '/api/settings')
-            # последний релиз именно с yamd: с yam 0.2 «последний» — уже другой менеджер, без демона
-            releases = self._yam_release_list(refresh=True)
-            if not releases:
-                raise s.AdbError('На GitHub нет релиза yam с yamd')
-            release = releases[0]
+            req = urllib.request.Request('https://api.github.com/repos/nyakokitsu/yam/releases/latest', headers={'User-Agent': 'webpanel'})
+            with urllib.request.urlopen(req, timeout=20) as response:
+                release = json.load(response)
             tag = release['tag_name']
             if not re.fullmatch(r'v?\d+\.\d+\.\d+', tag):
                 raise s.AdbError('Некорректная версия релиза YAM')

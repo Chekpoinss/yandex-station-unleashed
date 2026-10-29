@@ -1,22 +1,20 @@
 // Visual identity is independent of the explicitly selected hardware command profile.
-export const MODEL_NAMES={lite:'Станция Лайт',lite2:'Станция Лайт 2',mini3:'Станция Мини 3',mini3pro:'Станция Мини 3 Про',mini2:'Станция Мини 2 с часами',station2:'Станция 2'};
+export const MODEL_NAMES={lite:'Станция Лайт',lite2:'Станция Лайт 2',mini3:'Станция Мини 3',mini3pro:'Станция Мини 3 Про',station2:'Станция 2'};
 
 export function rendererProfile(profile,status={}){
   const hardware=String(status.hardware_model||'').toLowerCase();
   const hostname=String(status.hostname||'').trim().toLowerCase();
   let id;
   // Device-tree identity wins over a hostname that the owner may have renamed.
-  for(const [platform,model]of Object.entries({bergamot:'mini3',pickle:'mini3pro',plum:'lite2',yandexmidi:'station2','station-mini2':'mini2'})){
+  for(const [platform,model]of Object.entries({bergamot:'mini3',pickle:'mini3pro',plum:'lite2',yandexmidi:'station2'})){
     if(new RegExp('(^|[^a-z0-9])'+platform+'([^a-z0-9]|$)').test(hardware)){id=model;break;}
   }
   if(!id&&/\bstation[ -]micro\b/.test(hardware))id='lite';
-  if(!id&&/\bstation[ -]mini[ -]?2\b/.test(hardware))id='mini2';
   // Test Pro first: it shares the Mini 3 prefix, but has a different body and ring.
   if(!id){
     const patterns=[
       ['mini3pro',/^yandex-mini(?:-gen|-)?3-?pro(?:-|$)/],
       ['mini3',/^yandex-mini(?:-gen|-)?3(?:-|$)/],
-      ['mini2',/^yandex-mini(?:-gen|-)?2(?:-|$)/],
       ['lite2',/^yandex-lite(?:-gen|-)?2(?:-|$)/],
       ['lite',/^yandex-station-lite$/],
       ['station2',/^yandex-station(?:-gen|-)?2(?:-|$)/],

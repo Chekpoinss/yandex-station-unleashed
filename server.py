@@ -14,7 +14,6 @@ import hashlib
 import io
 import json
 import os
-import platform
 import random
 import re
 import shlex
@@ -38,9 +37,16 @@ import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
+# Keep ADB and other helper processes invisible when launched by pythonw on Windows.
+_SUBPROCESS_WINDOW_OPTIONS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+from panel_journal import Journal
+JOURNAL = Journal()
+
 import access
 import glagol
 
+UPSTREAM_VERSION = "0.2.0"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 MIME = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8",
@@ -74,13 +80,6 @@ BOOT_ALWAYS = f"{WEB_DIR}/boot_every_time"  # наш флаг: хук удаля
 SOUND_TARGET = f"{QUASAR}/sounds/common/boot.wav"
 SOUND_CUSTOM = f"{WEB_DIR}/boot_sound.wav"
 SOUND_ORIG = f"{WEB_DIR}/boot_sound.orig.wav"
-# Свои системные файлы Quasar: override/<путь от QUASAR> накрывает QUASAR/<путь> через bind mount. Оригинал в
-# /system только для чтения и остаётся под подменой — копии не нужны, «вернуть» = снять подмену и удалить свой.
-OVR_DIR = f"{WEB_DIR}/override"
-# Свои анимации — отдельно от подмен, встроенные не трогают: anims/ring/<имя>.led, anims/clock/<имя>.binscled.
-# В списках анимаций они — «my/<имя>…» рядом со встроенными.
-MY_ANIM_DIR = f"{WEB_DIR}/anims"
-MY_ANIM_NAME = re.compile(r"[\w-]{1,40}")
 # YAM (github.com/nyakokitsu/yam): менеджер пакетов для Станций. На колонке — демон yamd с HTTP API на :8099.
 YAM_DIR = "/data/quazar/yam"
 YAMD = f"{YAM_DIR}/bin/yamd"
@@ -92,12 +91,9 @@ YAM_FIX_EXEC = (f"for t in {YAM_PLUGINS}/*/plugin.toml; do [ -f \"$t\" ] || cont
                 "p=$(sed -n 's/^path *= *\"\\(.*\\)\"/\\1/p' \"$t\" | head -n 1); "
                 "case \"$p\" in ''|/*|*..*) continue ;; esac; [ -f \"$d/$p\" ] && chmod 755 \"$d/$p\"; done; true")
 # В консоли панели бинарники пакетов доступны по имени (fastfetch, …).
-YAM_PATH = (f"for d in {YAM_PLUGINS}/*/*/; do [ -d \"$d\" ] && PATH=\"$PATH:${{d%/}}\"; done; export PATH"
-            f"; [ -d /data/yam/bin ] && PATH=\"$PATH:/data/yam/bin\"; export PATH; ")
+YAM_PATH = (f"for d in {YAM_PLUGINS}/*/*/; do [ -d \"$d\" ] && PATH=\"$PATH:${{d%/}}\"; done; export PATH; ")
 YAM_PORT = 8099
 YAM_REGISTRY = "https://raw.githubusercontent.com/nyakokitsu/yapkg/registry/index.json"
-# yam 2 (релизы yam-v0.2+): уже не демон, а пакетный менеджер — команда yam на самой колонке. Ставим как их
-# install.sh: бинарник, профиль платформы и обёртка yam-run (она задаёт платформу и корень) в /data/yam.
 YAM2_ROOT = "/data/yam"
 YAM2 = f"{YAM2_ROOT}/bin/yam"
 YAM2_RUN = f"{YAM2_ROOT}/bin/yam-run"
@@ -120,15 +116,6 @@ except OSError:
     VERSION = "0.0.0"
 REPO = "dimap/yandex-station-web"
 LED_PREFIX = "plum"
-# Каталог сегментов часов, если он не {LEDS}/{LED_PREFIX}:white:clock: у Мини 2 сегменты называются иначе,
-# и профиль раскладывает их по именам Лайт 2 ссылками в /tmp (см. profiles.py).
-CLOCK_PATH = None
-
-
-def clock_path():
-    return CLOCK_PATH or f"{LEDS}/{LED_PREFIX}:white:clock"
-
-
 GLAGOL_PLATFORM = "plum"   # так Лайт 2 называет себя в запросах check_updates
 # Где панель хранит своё (токен Яндекса, пароль, сертификаты, история графиков). По умолчанию — рядом с server.py;
 # --data-dir / PANEL_DATA_DIR меняет это (в Docker — том /data). Пути пересчитываются в set_data_dir().
@@ -147,73 +134,6 @@ def set_data_dir(path):
     JOURNAL.open(DATA_DIR / ".panel_journal.jsonl")
 
 
-def redact(text):
-    """Убирает из текста то, чему не место в отчёте: токены и ключи, адреса, MAC, e-mail, имя пользователя в путях."""
-    text = re.sub(r"\b(?:y0_|AQAAAA)[\w-]{10,}", "••••", text)
-    text = re.sub(r"\b(sk|rk|pk|gsk|xai)-[\w-]{8,}", r"\1-••••", text)
-    text = re.sub(r"(?i)(bearer\s+|token[\"']?\s*[:=]\s*[\"']?|api[_-]?key[\"']?\s*[:=]\s*[\"']?)[\w.~+/-]{12,}", r"\1••••", text)
-    # IPv4 — но не версия прошивки вида 0.369.1.50.4794…: соседних цифр и точек быть не должно
-    text = re.sub(r"(?<![\d.])(?!127\.0\.0\.1(?![\d.]))(?:\d{1,3}\.){3}\d{1,3}(?!\d|\.\d)", "x.x.x.x", text)
-    text = re.sub(r"(?i)\b[0-9a-f]{2}(?::[0-9a-f]{2}){5}\b", "••:••:••:••:••:••", text)
-    text = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "•••@•••", text)
-    return re.sub(r"(?i)([/\\](?:home|users)[/\\])[^/\\\s]+", r"\1<user>", text)
-
-
-class Journal:
-    """Журнал панели: что нажимали, чем ответила колонка, что со связью. Тела запросов не пишем — в них бывают
-    ключи и пароли; сообщения проходят redact. Последние LIMIT записей лежат в .panel_journal.jsonl рядом
-    с данными панели — их показывает вкладка «Логи» и берёт «Отчёт для Issue»."""
-    LIMIT = 1000
-
-    def __init__(self):
-        self.path, self.lock = None, threading.Lock()
-        self.items = collections.deque(maxlen=self.LIMIT)
-        self.written = 0
-
-    def open(self, path):
-        with self.lock:
-            self.path, self.items = Path(path), collections.deque(maxlen=self.LIMIT)
-            try:
-                for line in self.path.read_text(encoding="utf-8").splitlines()[-self.LIMIT:]:
-                    with contextlib.suppress(ValueError):
-                        self.items.append(json.loads(line))
-            except OSError:
-                pass
-
-    def add(self, msg, level="info"):
-        msg = redact(str(msg))[:600]
-        with self.lock:
-            last = self.items[-1] if self.items else None
-            if last and last["msg"] == msg and last["level"] == level:
-                last["n"] = last.get("n", 1) + 1   # повторы (например, опрос при обрыве связи) — одной строкой
-                last["t"] = time.time()
-                return
-            item = {"t": time.time(), "level": level, "msg": msg}
-            self.items.append(item)
-            if not self.path:
-                return
-            self.written += 1
-            try:
-                if self.written % 200 == 0:   # время от времени ужимаем файл до последних LIMIT записей
-                    tmp = self.path.with_suffix(".tmp")
-                    tmp.write_text("".join(json.dumps(i, ensure_ascii=False) + "\n" for i in self.items), encoding="utf-8")
-                    os.replace(tmp, self.path)
-                else:
-                    with open(self.path, "a", encoding="utf-8") as f:
-                        f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            except OSError:
-                pass
-
-    def text(self, lines=300):
-        mark = {"info": " ", "warn": "⚠", "error": "✖"}
-        with self.lock:
-            items = list(self.items)[-lines:]
-        return "\n".join(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(i['t']))} {mark.get(i['level'], ' ')} {i['msg']}"
-                         + (f"  (×{i['n']})" if i.get("n", 1) > 1 else "") for i in items)
-
-
-JOURNAL = Journal()
-PANEL_PROFILE = ("lite2", False)   # (модель, определена ли сама) — ставит main()
 set_data_dir(ROOT)
 # Без пароля доступны только оболочка страницы и вход; всё остальное — после входа.
 PUBLIC_PATHS = {"/", "/index.html", "/manifest.webmanifest", "/sw.js", "/ca.crt", "/api/panel-auth",
@@ -231,7 +151,6 @@ def alsa_to_level(v):
     return 0 if v <= 0 else max(1, round((v - 49) * 19 / 206) + 1) * 5
 
 
-ALICE_COMMAND_LIMIT = 1024  # Conservative panel limit, matching Dialogs original_utterance.
 MUSIC_COMMANDS = {"play": (), "stop": (), "next": (), "prev": (), "rewind": ("position",),
                   "setVolume": ("volume",), "repeat": ("mode",), "shuffle": ("enable",), "sendText": ("text",)}
 YAMD_CMD = f"exec {YAMD} --data-dir {YAM_DIR}/data >{YAM_DIR}/yamd.log 2>&1"
@@ -245,10 +164,6 @@ ALARM_STATE = "/tmp/webpanel_alarm.state"
 ALARM_CMD = "/tmp/webpanel_alarm.cmd"
 ALARM_FIRE = "/tmp/webpanel_alarm.fire"
 ALARM_SRC = Path(__file__).resolve().parent / "device" / "alarmd.sh"
-SCENES_CONF = f"{ALARM_DIR}/scenes.conf"
-SCENE_FIRE = "/tmp/webpanel_scene.fire"
-SCENE_RUN = "/tmp/webpanel_scene."      # + id: pid идущего сценария
-SCENES_LOG = f"{ALARM_DIR}/scenes.log"
 
 
 def alarm_script():
@@ -265,12 +180,10 @@ ANALYTICS_HOSTS = ("clck.yandex.net", "report.appmetrica.yandex.net", "appmetric
 # Неотправленные события телеметрия копит здесь (до 1 МБ) и отправит, как только адреса откроются. Телеметрия
 # читает файл при старте и дописывает его при выходе, поэтому сначала kill -9, потом удаление; launcher
 # перезапускает её через секунду уже с пустой очередью. Остальное (fluent-bit, teleme3d) лежит в /tmp.
-# Чистим только по действию пользователя: при включении и выключении блокировки и кнопкой.
 METRICA_BATCH = "/data/quasar/appmetrica/persistedBatch"
 ANALYTICS_PURGE = ("p=$(ps | grep '[m]aind --telemetry' | awk '{print $1}'); "
                    f"[ -n \"$p\" ] && kill -9 $p; rm -f {METRICA_BATCH}")
-# Свой голосовой помощник (device/assistant): «Алиса, спроси GPT …» уходит выбранной модели. Программа на Go
-# работает на самой колонке; панель кладёт её и config.json, проверяет текстом и читает состояние из /tmp.
+
 ASSIST_DIR = f"{WEB_DIR}/assistant"
 ASSISTD = f"{ASSIST_DIR}/assistantd"
 ASSIST_CONF = f"{ASSIST_DIR}/config.json"
@@ -354,57 +267,21 @@ BOOT_HOOK_SCRIPT = (
     f"bind {BOOT_CUSTOM} {BOOT_TARGET}\n"
     f"bind {SOUND_CUSTOM} {SOUND_TARGET}\n"
     f"bind {HOSTS_CUSTOM} {HOSTS_TARGET}\n"
-    f"[ -d {OVR_DIR} ] && (cd {OVR_DIR} && find . -type f) | while read -r f; do "
-    f"bind \"{OVR_DIR}/${{f#./}}\" \"{QUASAR}/${{f#./}}\"; done\n"
-    # Очередь аналитики при загрузке не чистим: для этого телеметрию приходится убивать kill -9, а в первую
-    # минуту после старта это совпало с зависанием звука у Алисы. Адреса закрыты — очередь и так не уйдёт.
+    # очередь аналитики — через минуту и в фоне: телеметрия стартует первой, и launcher ждёт её,
+    # прежде чем запустить основной maind; адреса уже закрыты, так что за минуту ничего не уйдёт
+    f"[ -f {HOSTS_CUSTOM} ] && ( sleep 60; {ANALYTICS_PURGE} ) >/dev/null 2>&1 &\n"
     # yamd сам после загрузки не стартует; start-stop-daemon -b — чтобы не держать rootkeeper.sh
     f"[ -f {YAM_AUTOSTART} ] && [ -x {YAMD} ] && ! pidof yamd >/dev/null && "
     f"start-stop-daemon -S -b -m -p /tmp/webpanel_yamd.sd -x /bin/sh -- -c {shlex.quote(YAMD_CMD)}\n"
     f"[ -f {ALARM_CONF} ] && [ -f {ALARMD} ] && start-stop-daemon -S -b -m -p {ALARM_SD} -x /bin/sh -- {ALARMD}\n"
-    f"[ -f {ASSIST_CONF} ] && [ -x {ASSISTD} ] && start-stop-daemon -S -b -m -p {ASSIST_SD} -x /bin/sh -- -c {shlex.quote(ASSIST_RUN)}\n"
-    f"[ -f {BTOUT_MAC} ] && [ -f {BTOUT_SH} ] && start-stop-daemon -S -b -m -p {BTOUT_SD} -x /bin/sh -- {BTOUT_SH}\n"
-    # службы пакетов yam 2, отмеченные «при загрузке»
-    f"for f in {YAM2_SVC_DIR}/boot/*; do [ -f \"$f\" ] && [ -f \"{YAM2_SVC_DIR}/${{f##*/}}.sh\" ] && "
-    f"start-stop-daemon -S -b -m -p \"{YAM2_SVC_PID}${{f##*/}}.pid\" -x /bin/sh -- \"{YAM2_SVC_DIR}/${{f##*/}}.sh\"; done\n"
     "exit 0\n"
 )
 ROOTKEEPER = "/data/quasar/rootkeeper.sh"
-# rootkeeper.sh создаёт способ рутования, и он есть не у всех. Штатный onboot.sh запускает его, если файл есть, —
-# тогда панель создаёт его сама и помечает этим файлом, чтобы при откате удалить целиком.
-ROOTKEEPER_CREATED = f"{ROOTKEEPER}.webpanel.created"
-ROOTKEEPER_CALLER = "/system/vendor/quasar/onboot.sh"
-# откат созданного панелью rootkeeper.sh: после удаления нашей строки в нём остались только комментарии
-ROOTKEEPER_DROP_CREATED = (f"if [ -f {ROOTKEEPER_CREATED} ] && [ -z \"$(grep -v '^#' {ROOTKEEPER} 2>/dev/null | grep -v '^[[:space:]]*$')\" ]; "
-                           f"then rm -f {ROOTKEEPER} {ROOTKEEPER_CREATED} {ROOTKEEPER}.webpanel.bak; fi")
 HOOK_MARK = "# webpanel-boot-hook"
-# Если rootkeeper.sh нет и штатный onboot.sh его не вызывает (колонка рутована другим способом), но /etc/init.d
-# доступна для записи (так её оставляют некоторые способы рутования: alicebridge, dropbear кладут туда S99z…),
-# хук запускается своим скриптом оттуда. Корень сами не перемонтируем. Запускается после S99quasar: будильник,
-# ассистент и службы успевают, а своя заставка и звук запуска могут не успеть.
-INITD_DIR = "/etc/init.d"
-INITD_HOOK = f"{INITD_DIR}/S99zwebpanel"
-
-
-def initd_hook_script():
-    return (f"#!/bin/sh\n{HOOK_MARK} — автозапуск веб-панели (rootkeeper.sh нет)\n"
-            f"[ \"$1\" = start ] || exit 0\n[ -x {BOOT_HOOK} ] && {BOOT_HOOK}\nexit 0\n")
-
-
-def initd_writable():
-    """sh: в init.d можно писать. Пробуем по-настоящему: test -w у busybox для root не видит, что раздел только для чтения."""
-    return f"{{ touch {INITD_DIR}/.webpanel_w 2>/dev/null && rm -f {INITD_DIR}/.webpanel_w; }}"
-
 
 def hook_active():
-    """sh: хук подключён — строка в rootkeeper.sh или свой скрипт в init.d."""
-    return f"{{ grep -q '{HOOK_MARK}' {ROOTKEEPER} 2>/dev/null || grep -q '{HOOK_MARK}' {INITD_HOOK} 2>/dev/null; }}"
-
-
-def hook_drop():
-    """sh: снять хук — строку из rootkeeper.sh (и созданный нами файл), свой скрипт из init.d."""
-    return (f"[ -f {ROOTKEEPER} ] && sed -i '/{HOOK_MARK}/d' {ROOTKEEPER}; {ROOTKEEPER_DROP_CREATED}; "
-            f"grep -q '{HOOK_MARK}' {INITD_HOOK} 2>/dev/null && rm -f {INITD_HOOK}")
+    # Read-only status; Lite1's existing init entry is never created or edited.
+    return f"{{ grep -q '{HOOK_MARK}' {ROOTKEEPER} 2>/dev/null || grep -q '# webpanel: Micro alarm service' /etc/init.d/S99zpanelalarm 2>/dev/null; }}"
 
 
 # Сегменты 7-сегментного индикатора: A — верх, B — верх-право, C — низ-право,
@@ -490,7 +367,7 @@ def zstd_decompress(data):
     except ImportError:
         pass
     try:
-        return subprocess.run(["zstd", "-dc"], input=data, capture_output=True, check=True).stdout
+        return subprocess.run(["zstd", "-dc"], input=data, capture_output=True, check=True, **_SUBPROCESS_WINDOW_OPTIONS).stdout
     except (OSError, subprocess.CalledProcessError):
         raise AdbError(ZSTD_HELP) from None
 
@@ -505,49 +382,9 @@ def zstd_compress(data):
         pass
     try:
         return subprocess.run(["zstd", "-19", "-c", "--no-content-size", "--no-check"],
-                              input=data, capture_output=True, check=True).stdout
+                              input=data, capture_output=True, check=True, **_SUBPROCESS_WINDOW_OPTIONS).stdout
     except (OSError, subprocess.CalledProcessError):
         raise AdbError(ZSTD_HELP) from None
-
-
-
-# Анимация кольца (.led) — текст: «RRGGBB RRGGBB RRGGBB мс» на кадр (3 точки у Лайт 2, 6 у Мини 2) и директивы
-# loop, smooth N, gradient …, rotate …, gammacorrection, # комментарий. Простые кадры редактор показывает
-# визуально, остальное — только текстом.
-LED_LINE = re.compile(r"(loop|gammacorrection|smooth\s+\d{1,6}|gradient(\s+[0-9a-fA-F]{1,6})+|"
-                      r"(rotate\s+)?([0-9a-fA-F]{6}\s+){1,32}\d{1,6}|#[^\x00-\x1f]*)?")
-
-
-def check_led(text):
-    if not isinstance(text, str) or len(text) > 64 * 1024:
-        raise AdbError("анимация кольца: нужен текст до 64 КБ")
-    text = text.replace("\r\n", "\n")
-    for n, line in enumerate(text.split("\n"), 1):
-        if not LED_LINE.fullmatch(line.strip()):
-            raise AdbError(f"анимация кольца, строка {n}: непонятно «{line.strip()[:40]}»")
-    if not any(re.fullmatch(r"(rotate\s+)?([0-9a-fA-F]{6}\s+)+\d+|gradient.*", l.strip()) for l in text.split("\n")):
-        raise AdbError("в анимации кольца нет ни одного кадра")
-    return text if text.endswith("\n") else text + "\n"
-
-
-def parse_led(text):
-    """Кадры для предпросмотра; simple — в файле только кадры и loop, его можно править визуально."""
-    frames, loop, simple = [], False, True
-    for line in text.splitlines():
-        parts = line.split()
-        if not parts:
-            continue
-        if parts == ["loop"]:
-            loop = True
-            continue
-        try:
-            if len(parts) >= 2 and all(len(h) == 6 for h in parts[:-1]):
-                frames.append({"c": [[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in parts[:-1]], "ms": int(parts[-1])})
-                continue
-        except ValueError:
-            pass
-        simple = False
-    return {"loop": loop, "frames": frames, "text": text, "simple": simple}
 
 
 def decode_clock_pattern(name, data):
@@ -606,7 +443,7 @@ def clock_player_script(frames):
     names = " ".join(CLOCK_LEDS)
     lines = [
         "#!/bin/sh",
-        f"L={clock_path()}",
+        f"L={LEDS}/{LED_PREFIX}:white:clock",
         f"for n in {names}; do echo \"$n $(cat $L$n/brightness)\"; done > {snap}",
         f"restore() {{ while read n v; do echo $v > $L$n/brightness; done < {snap}; rm -f {snap}; exit 0; }}",
         "trap restore TERM INT",
@@ -664,14 +501,11 @@ class Adb:
     def _base(self):
         return [self.adb] + (["-s", self.serial] if self.serial else [])
 
-    # Старый adbd (Лайт 2) не знает shell_v2: adb shell всегда завершается с 0, а код команды теряется.
-    # Поэтому команда идёт в подоболочке, а её код печатается меткой в конце вывода (exit внутри тоже ловится).
     RC_MARK = "@@webpanel-rc="
 
     def shell(self, cmd, timeout=15, check=True):
         try:
-            p = subprocess.run(self._base() + ["shell", f"(\n{cmd}\n); printf '\\n{self.RC_MARK}%d\\n' $?"],
-                               capture_output=True, timeout=timeout)
+            p = subprocess.run(self._base() + ["shell", f"(\n{cmd}\n); printf '\\n{self.RC_MARK}%d\\n' $?"], capture_output=True, timeout=timeout, **_SUBPROCESS_WINDOW_OPTIONS)
         except subprocess.TimeoutExpired:
             # Чаще всего это выключенная колонка при «зависшем» соединении adb — пусть Connection проверит.
             if self.conn:
@@ -680,9 +514,9 @@ class Adb:
         out = p.stdout.decode("utf-8", "replace")
         err = p.stderr.decode("utf-8", "replace")
         rc = p.returncode
-        m = re.search(r"\r*\n" + re.escape(self.RC_MARK) + r"(\d+)\r*\n?\Z", out)
-        if m:
-            out, rc = out[:m.start()], rc or int(m.group(1))
+        mark = re.search(r"\r*\n" + re.escape(self.RC_MARK) + r"(\d+)\r*\n?\Z", out)
+        if mark:
+            out, rc = out[:mark.start()], rc or int(mark.group(1))
         if p.returncode != 0 and not out and any(s in err.lower() for s in ADB_LOST):
             # Переподключением занимается Connection; пользователю — без сырого текста adb.
             if self.conn:
@@ -690,17 +524,16 @@ class Adb:
             raise AdbError("Связь с колонкой потеряна")
         if check and rc != 0 and not out and err:
             raise AdbError(err.strip())
-        # псевдотерминал колонки даёт \r\n, а adb.exe на Windows бывает дописывает ещё \r — \r\r\n
-        crlf = lambda s: re.sub(r"\r+\n", "\n", s)
+        crlf = lambda value: re.sub(r"\r+\n", "\n", value)
         return crlf(out), crlf(err), rc
 
     def pull(self, remote, local, timeout=300):
         # exec-out этот adbd не поддерживает ("error: closed"), а shell идёт через pty
         # и портит бинарные данные, поэтому файлы забираем только через pull.
         with self._transfer():
-            p = subprocess.run(self._base() + ["pull", "-a", remote, str(local)], capture_output=True, timeout=timeout)
+            p = subprocess.run(self._base() + ["pull", "-a", remote, str(local)], capture_output=True, timeout=timeout, **_SUBPROCESS_WINDOW_OPTIONS)
         if p.returncode != 0:
-            raise AdbError(adb_usage_error((p.stderr or p.stdout).decode("utf-8", "replace").strip(), "pull -a"))
+            raise AdbError((p.stderr or p.stdout).decode("utf-8", "replace").strip())
 
     def read_bytes(self, remote, timeout=120):
         with tempfile.TemporaryDirectory() as td:
@@ -710,35 +543,33 @@ class Adb:
 
     def ls(self, remote):
         """Листинг через sync-протокол: [(mode, size, mtime, name)], имена с пробелами не ломаются."""
-        p = subprocess.run(self._base() + ["ls", remote], capture_output=True, timeout=20)
+        p = subprocess.run(self._base() + ["ls", remote], capture_output=True, timeout=20, **_SUBPROCESS_WINDOW_OPTIONS)
         out = p.stdout.decode("utf-8", "replace")
         if p.returncode != 0:
             raise AdbError((p.stderr.decode("utf-8", "replace") or out).strip())
         res = []
-        # adb.exe на Windows заканчивает строки \r\n: без rstrip папка открывалась бы как «имя\r».
-        # splitlines() не подходит — режет и по \x0c, \x1c и прочим, а они бывают в именах файлов.
         for line in out.split("\n"):
-            parts = line.rstrip("\r").split(" ", 3)
+            parts = line.split(" ", 3)
             if len(parts) == 4:
                 res.append((int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), parts[3]))
         return res
 
     def push(self, local, remote, timeout=120):
         with self._transfer():
-            p = subprocess.run(self._base() + ["push", str(local), remote], capture_output=True, timeout=timeout)
+            p = subprocess.run(self._base() + ["push", str(local), remote], capture_output=True, timeout=timeout, **_SUBPROCESS_WINDOW_OPTIONS)
         if p.returncode != 0:
-            raise AdbError(adb_usage_error(p.stderr.decode("utf-8", "replace").strip(), "push"))
+            raise AdbError(p.stderr.decode("utf-8", "replace").strip())
 
     def devices(self):
-        p = subprocess.run([self.adb, "devices", "-l"], capture_output=True, timeout=10)
+        p = subprocess.run([self.adb, "devices", "-l"], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)
         return p.stdout.decode("utf-8", "replace")
 
     def forward(self, remote_port):
         """Проброс порта колонки на свободный локальный (adb forward tcp:0), возвращает локальный порт."""
-        p = subprocess.run(self._base() + ["forward", "tcp:0", f"tcp:{remote_port}"], capture_output=True, timeout=10)
+        p = subprocess.run(self._base() + ["forward", "tcp:0", f"tcp:{remote_port}"], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)
         out = p.stdout.decode().strip()
         if p.returncode != 0 or not out.isdigit():
-            raise AdbError("adb forward: " + adb_usage_error(p.stderr.decode("utf-8", "replace").strip() or out, "forward tcp:0"))
+            raise AdbError("adb forward: " + (p.stderr.decode().strip() or out))
         return int(out)
 
 
@@ -765,7 +596,6 @@ class Connection:
 
     def note(self, msg, level="info"):
         self.log.append({"t": time.time(), "level": level, "msg": msg})
-        JOURNAL.add("связь: " + msg, level)
 
     def _set(self, state):
         if state != self.state:
@@ -789,7 +619,7 @@ class Connection:
 
     def _adb_state(self):
         try:
-            p = subprocess.run(self.adb._base() + ["get-state"], capture_output=True, timeout=8)
+            p = subprocess.run(self.adb._base() + ["get-state"], capture_output=True, timeout=8, **_SUBPROCESS_WINDOW_OPTIONS)
         except subprocess.TimeoutExpired:
             return "", "adb get-state: таймаут"
         return p.stdout.decode().strip(), p.stderr.decode().strip()
@@ -808,14 +638,17 @@ class Connection:
         if self.adb.transfers:      # пока идёт передача файла, медленный ответ — не обрыв
             return True
         try:
-            p = subprocess.run(self.adb._base() + ["shell", "echo ok"], capture_output=True, timeout=4)
+            p = subprocess.run(self.adb._base() + ["shell", "echo ok"], capture_output=True, timeout=4, **_SUBPROCESS_WINDOW_OPTIONS)
             return p.stdout.strip() == b"ok"
         except subprocess.TimeoutExpired:
             return False
 
     def _drop(self):
         if self.adb.serial and ":" in self.adb.serial:
-            subprocess.run([self.adb.adb, "disconnect", self.adb.serial], capture_output=True, timeout=10)
+            try:
+                subprocess.run([self.adb.adb, "disconnect", self.adb.serial], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                self.note(f"Не удалось сбросить adb: {exc}", "warn")
 
     def _sleep(self, seconds):
         self.wake.wait(seconds)
@@ -850,9 +683,9 @@ class Connection:
                 continue
             self._set("connecting")
             self.note(f"adb connect {self.adb.serial}")
-            subprocess.run([self.adb.adb, "disconnect", self.adb.serial], capture_output=True, timeout=10)
+            self._drop()
             try:
-                p = subprocess.run([self.adb.adb, "connect", self.adb.serial], capture_output=True, timeout=15)
+                p = subprocess.run([self.adb.adb, "connect", self.adb.serial], capture_output=True, timeout=15, **_SUBPROCESS_WINDOW_OPTIONS)
                 out = (p.stdout + p.stderr).decode("utf-8", "replace").strip()
             except subprocess.TimeoutExpired:
                 out = "таймаут adb connect"
@@ -886,10 +719,10 @@ def clock_restore_sh():
     draw = " ".join(f"{ch}) S={segs};;" for ch, segs in SEGMENTS.items() if ch.isdigit())
     return "\n".join([
         f"snap_save() {{ {{ echo \"t $(date +%s)\"; for n in {' '.join(CLOCK_LEDS)}; do "
-        f"echo \"$n $(cat {clock_path()}$n/brightness)\"; done; }} > \"$1\"; }}",
+        f"echo \"$n $(cat {LEDS}/{LED_PREFIX}:white:clock$n/brightness)\"; done; }} > \"$1\"; }}",
         "clock_restore() {",
         "  [ -f \"$1\" ] || return 0",
-        f"  while read n v; do [ \"$n\" = t ] || echo $v > {clock_path()}$n/brightness; done < \"$1\"",
+        f"  while read n v; do [ \"$n\" = t ] || echo $v > {LEDS}/{LED_PREFIX}:white:clock$n/brightness; done < \"$1\"",
         "  t0=$(sed -n 's/^t //p' \"$1\"); [ -n \"$t0\" ] || return 0",
         "  el=$(( $(date +%s) / 60 - t0 / 60 )); [ $el -gt 0 ] || return 0",
         "  hm=''; B=0",
@@ -912,7 +745,7 @@ def clock_restore_sh():
         "  p=0",
         "  for c in $(echo \"$new\" | sed 's/./& /g'); do",
         f"    case \"$c\" in {draw} *) S='';; esac",
-        f"    for g in A B C D E F G; do case \"$S\" in *$g*) v=$B;; *) v=0;; esac; echo $v > {clock_path()}$g$p/brightness; done",
+        f"    for g in A B C D E F G; do case \"$S\" in *$g*) v=$B;; *) v=0;; esac; echo $v > {LEDS}/{LED_PREFIX}:white:clock$g$p/brightness; done",
         "    p=$((p + 1))",
         "  done",
         "}",
@@ -929,7 +762,7 @@ def display_script(mode, frame=None, seconds=0, bright=160):
     """
     lines = [
         "#!/bin/sh",
-        f"L={clock_path()}",
+        f"L={LEDS}/{LED_PREFIX}:white:clock",
         f"B={bright}",
         clock_restore_sh(),
         # если перед этим был «один раз», в его снимке — настоящие часы; иначе снимаем сейчас
@@ -1199,7 +1032,7 @@ class LedStream:
             self._kill_device_loop()   # хвосты прошлого запуска сервера
             while time.time() - self.wanted <= 3:
                 proc = subprocess.Popen(self.adb._base() + ["shell", loop], stdout=subprocess.PIPE,
-                                        stderr=subprocess.DEVNULL, text=True)
+                                        stderr=subprocess.DEVNULL, text=True, **_SUBPROCESS_WINDOW_OPTIONS)
                 try:
                     for line in proc.stdout:
                         parts = line.split()
@@ -1219,30 +1052,6 @@ class LedStream:
                 self.running = False
 
 
-# pull -a и forward tcp:0 появились в новых adb; 1.0.31 вместо ответа печатает справку. 1.0.39 — platform-tools 28 (2018).
-ADB_MIN = (1, 0, 39)
-ADB_OLD = ("adb {got} слишком старый ({path}): панели нужен adb {need} или новее (Android platform-tools 28+).\n"
-           "Скачайте свежий: https://developer.android.com/tools/releases/platform-tools — и положите папку platform-tools\n"
-           "рядом с server.py, укажите путь в переменной ADB или уберите старый adb из PATH.")
-
-
-def adb_version(path):
-    """(1, 0, 41) из «Android Debug Bridge version 1.0.41»; None — не удалось узнать."""
-    try:
-        out = subprocess.run([path, "version"], capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    m = re.search(r"version (\d+)\.(\d+)\.(\d+)", out)
-    return tuple(map(int, m.groups())) if m else None
-
-
-def adb_usage_error(text, what):
-    """Старый adb на незнакомую команду отвечает простынёй справки — показываем вместо неё понятную причину."""
-    if "Android Debug Bridge version" in text and len(text) > 300:
-        return f"adb не понял команду «{what}» — похоже, он слишком старый, нужен platform-tools 28+"
-    return text
-
-
 def find_adb():
     # Телефон (APK) или компьютер без adb: протокол adb на чистом Python (pyadb.py), только по сети
     if os.environ.get("PANEL_PYADB"):
@@ -1258,15 +1067,9 @@ def find_adb():
         cands.append(str(Path.home() / "Library/Android/sdk/platform-tools/adb"))
     if os.name == "nt":
         cands.append(str(Path(os.environ.get("LOCALAPPDATA", "")) / "Android/Sdk/platform-tools/adb.exe"))
-    old = None
     for cand in cands:
         if cand and Path(cand).is_file():
-            version = adb_version(cand)
-            if version is None or version >= ADB_MIN:
-                return cand
-            old = old or (cand, version)
-    if old:
-        raise SystemExit(ADB_OLD.format(got=".".join(map(str, old[1])), path=old[0], need=".".join(map(str, ADB_MIN))))
+            return cand
     raise SystemExit("adb не найден. Установите Android platform-tools (https://developer.android.com/tools/releases/platform-tools)\n"
                      "и добавьте в PATH, положите папку platform-tools рядом с server.py или укажите путь в переменной ADB.")
 
@@ -1467,7 +1270,9 @@ class Panel:
     def __init__(self, adb):
         self.adb = adb
         self._version = None
-        self.ffmpeg = shutil.which("ffmpeg")
+        self.alarm_media_lock = threading.RLock()
+        bundled_ffmpeg = Path(__file__).parent / 'runtime' / 'ffmpeg.exe'
+        self.ffmpeg = str(bundled_ffmpeg) if bundled_ffmpeg.is_file() else shutil.which("ffmpeg")
 
     def _configure_glagol(self, device_id):
         # Glagol использует тип устройства из прошивки, а не профиль LED/часов панели.
@@ -1586,7 +1391,7 @@ echo @@BLUEZ
             dst = Path(td) / "out.wav"
             p = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
                                 "-ac", "2", "-ar", "48000", "-sample_fmt", "s16", "-y", str(dst)],
-                               input=src_bytes, capture_output=True, timeout=300)
+                               input=src_bytes, capture_output=True, timeout=300, **_SUBPROCESS_WINDOW_OPTIONS)
             if p.returncode != 0:
                 raise AdbError("ffmpeg: " + p.stderr.decode("utf-8", "replace").strip()[-400:])
             self.adb.push(dst, REMOTE_PLAY)
@@ -1605,26 +1410,6 @@ echo @@BLUEZ
         if name not in self.sounds():
             raise AdbError("нет такого звука")
         return self._play_path(f"{SOUNDS_DIR}/{name}")
-
-    # ---------- свои системные звуки ----------
-    SOUND_UPLOAD_LIMIT = 50 * 1024 * 1024
-
-    def _sound_paths(self, name):
-        if name not in self.sounds():
-            raise AdbError("нет такого звука")
-        return f"{SOUNDS_DIR}/{name}", f"{OVR_DIR}/sounds/{name}"
-
-    def sounds_custom(self):
-        """Какие системные звуки заменены. Звук запуска — свой файл со времён вкладки «Запуск»."""
-        out, _, _ = self.adb.shell(
-            f"cd {OVR_DIR}/sounds 2>/dev/null && find . -type f; [ -f {SOUND_CUSTOM} ] && echo @boot; "
-            f"grep ' {SOUNDS_DIR}/' /proc/mounts | cut -d' ' -f2; true", check=False)
-        lines = strip_ansi(out).split()
-        mounted = {l[len(SOUNDS_DIR) + 1:] for l in lines if l.startswith(SOUNDS_DIR + "/")}
-        custom = {l[2:] for l in lines if l.startswith("./")}
-        if "@boot" in lines:
-            custom.add(posixpath.relpath(SOUND_TARGET, SOUNDS_DIR))
-        return {"custom": sorted(custom), "pending": sorted(custom - mounted), "ffmpeg": bool(self.ffmpeg)}
 
     def _audio_like(self, original, body):
         """Перекодирует body в тот же кодек, частоту и число каналов, что у стандартного звука: расширению не
@@ -1653,36 +1438,6 @@ echo @@BLUEZ
             raise AdbError("ffmpeg: " + p.stderr.decode("utf-8", "replace").strip()[-400:])
         return p.stdout
 
-    def sound_replace(self, name, body):
-        if len(body) > self.SOUND_UPLOAD_LIMIT:
-            raise AdbError("файл слишком большой")
-        target, custom = self._sound_paths(name)
-        if target == SOUND_TARGET:
-            self.boot_sound_install(name, body)
-        else:
-            self._install_override(self._audio_like(self._original_bytes(target), body), custom, target)
-        return self.sounds_custom()
-
-    def sound_reset(self, name):
-        target, custom = self._sound_paths(name)
-        if target == SOUND_TARGET:
-            self.boot_sound_reset()
-        else:
-            self._remove_override(custom, target)
-        return self.sounds_custom()
-
-    def sound_play_original(self, name):
-        target, _ = self._sound_paths(name)
-        data = self._original_bytes(target)
-        if data[:4] == b"RIFF":
-            with tempfile.TemporaryDirectory() as td:
-                (Path(td) / "f.wav").write_bytes(data)
-                self.adb.push(Path(td) / "f.wav", REMOTE_PLAY)
-            self._play_remote_wav(REMOTE_PLAY)
-        else:
-            self._transcode_and_play(data)
-        return {"ok": True}
-
     def play_upload(self, filename, body):
         if filename.lower().endswith(".wav") and not self.ffmpeg:
             with tempfile.NamedTemporaryFile(suffix=".wav") as f:
@@ -1694,592 +1449,6 @@ echo @@BLUEZ
             self._transcode_and_play(body)
         return {"ok": True}
 
-    def stop_sound(self):
-        self.adb.shell("killall aplay 2>/dev/null; true")
-        return {"ok": True}
-
-    # ---------- светодиоды ----------
-    def patterns(self):
-        res = {}
-        for kind, d in PATTERNS.items():
-            # свои — не через ls: busybox показывает не-ASCII имена знаками «?»
-            out, _, _ = self.adb.shell(f"ls {d}; echo '<<<'; for f in {MY_ANIM_DIR}/{kind}/*; do [ -f \"$f\" ] && echo \"${{f##*/}}\"; done; true")
-            std, _, mine = strip_ansi(out).partition("<<<")
-            res[kind] = sorted(std.split()) + ["my/" + n for n in sorted(mine.split())]
-        return res
-
-    @staticmethod
-    def _pattern_path(kind, name):
-        """Файл анимации на колонке: встроенная — в Quasar, своя (my/…) — в MY_ANIM_DIR."""
-        if name.startswith("my/"):
-            return f"{MY_ANIM_DIR}/{kind}/{name[3:]}"
-        return f"{PATTERNS[kind]}/{name}"
-
-    # ---------- свои анимации ----------
-    def my_anim_save(self, kind, name, frames=None, text=None):
-        """Сохранить свою анимацию (новую или поверх своей же). Имя — буквы, цифры, «_» и «-»."""
-        name = re.sub(r"\s+", "_", str(name or "").strip())
-        if kind not in PATTERNS or not MY_ANIM_NAME.fullmatch(name):
-            raise AdbError("имя своей анимации — до 40 букв, цифр, «_» или «-»")
-        if kind == "clock":
-            if not isinstance(frames, list) or not frames:
-                raise AdbError("нет кадров")
-            data, fname = encode_clock_pattern(frames), name + ".binscled"
-        else:
-            data, fname = check_led(text).encode(), name + ".led"
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "a"
-            f.write_bytes(data)
-            self.adb.shell(f"mkdir -p {MY_ANIM_DIR}/{kind}")
-            self.adb.push(f, f"{MY_ANIM_DIR}/{kind}/{fname}")
-        return {"name": "my/" + fname, "patterns": self.patterns()}
-
-    def my_anim_delete(self, kind, name):
-        if kind not in PATTERNS or not name.startswith("my/") or name not in self.patterns()[kind]:
-            raise AdbError("нет такой своей анимации")
-        self.adb.shell(f"rm -f {shlex.quote(self._pattern_path(kind, name))}; "
-                       f"rmdir {MY_ANIM_DIR}/{kind} {MY_ANIM_DIR} 2>/dev/null; true")
-        return {"patterns": self.patterns()}
-
-    def play_pattern(self, kind, name, seconds):
-        if kind not in PATTERNS or name not in self.patterns()[kind]:
-            raise AdbError("нет такого паттерна")
-        path = self._pattern_path(kind, name)
-        if kind == "clock":
-            return self.play_clock(decode_clock_pattern(name, self.adb.read_bytes(path)), seconds)
-        self._run_timed(kind, f"{QRUN}/led_util {shlex.quote(path)}", seconds)
-        return {"ok": True}
-
-    def _run_timed(self, kind, cmd, seconds):
-        # Ни led_util, ни зацикленные анимации не завершаются сами — запускаем в фоне и убиваем по таймеру.
-        seconds = max(1, min(600, int(seconds)))
-        pidf = f"/tmp/webpanel_{kind}.pid"
-        self.stop_pattern(kind)
-        self.detach(kind, f"{cmd} >/dev/null 2>&1 & p=$!; echo $p > {pidf}; "
-                          f"sleep {seconds}; kill $p 2>/dev/null; rm -f {pidf}")
-
-    def play_clock(self, frames, seconds):
-        frames = decode_clock_pattern(".binscled", encode_clock_pattern(frames))  # нормализуем ввод клиента
-        self.display_stop()
-        script = "/tmp/webpanel_clock_anim.sh"
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "anim.sh"
-            write_unix(f, clock_player_script(frames))
-            self.adb.push(f, script)
-        self._run_timed("clock", f"sh {script}", seconds)
-        return {"ok": True, "frames": len(frames)}
-
-    # ---------- «закреплённый» дисплей часов ----------
-    def display_status(self):
-        out, _, _ = self.adb.shell(f"[ -f /tmp/webpanel_display.sd ] && kill -0 $(cat /tmp/webpanel_display.sd) 2>/dev/null "
-                                   f"&& cat {DISPLAY_MODE} 2>/dev/null; true")
-        parts = out.split()
-        if not parts:
-            return {"mode": None}
-        res = {"mode": parts[0]}
-        if parts[0] == "timer" and len(parts) > 1:
-            dev_now, _, _ = self.adb.shell("date +%s")
-            res["left"] = max(0, int(parts[1]) - int(dev_now.strip() or 0))
-        return res
-
-    def display_set(self, d):
-        mode = d.get("mode")
-        bright = max(1, min(255, int(d.get("brightness", 160))))
-        frame, seconds = None, 0
-        if mode == "frame":
-            frame = [max(0, min(255, int(x))) for x in d["v"]]
-            if len(frame) != len(CLOCK_LEDS):
-                raise AdbError(f"нужно {len(CLOCK_LEDS)} значений")
-        elif mode == "timer":
-            seconds = max(1, min(99 * 60 + 59, int(d["seconds"])))
-        elif mode not in ("date", "temp"):
-            raise AdbError("неизвестный режим дисплея")
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "display.sh"
-            write_unix(f, display_script(mode, frame, seconds, bright))
-            self.adb.push(f, DISPLAY_SCRIPT)
-            if mode == "timer":
-                self._prepare_timer_sound(Path(td))
-        self.display_stop()
-        self.stop_pattern("clock")
-        self.detach("display", f"exec sh {DISPLAY_SCRIPT}")
-        # Скрипт пишет свой mode-файл не мгновенно — отвечаем сразу тем, что запустили.
-        return {"mode": mode, **({"left": seconds} if mode == "timer" else {})}
-
-    def _prepare_timer_sound(self, td):
-        """sounds/*/timer.wav у Quasar на деле Ogg/Opus — aplay его не играет. Один раз перекодируем в WAV."""
-        out, _, _ = self.adb.shell(f"[ -f {TIMER_SOUND} ] && echo have; true")
-        if "have" in out or not self.ffmpeg:
-            return
-        src = next((f"{SOUNDS_DIR}/{n}" for n in self.sounds() if n.endswith("/timer.wav") or n == "timer.wav"), None)
-        if not src:
-            return
-        dst = td / "timer.wav"
-        r = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "2", "-ar", "48000",
-                            "-sample_fmt", "s16", "-y", str(dst)], input=self.adb.read_bytes(src), capture_output=True)
-        if r.returncode == 0:
-            self.adb.push(dst, TIMER_SOUND)
-
-    @staticmethod
-    def _once_snapshot():
-        """Перед «показать один раз» запоминаем дисплей (если снимка ещё нет — повторные «один раз» не затирают часы)."""
-        return f"{clock_restore_sh()}\n[ -f {DISPLAY_ONCE} ] || snap_save {DISPLAY_ONCE}\n"
-
-    def display_stop(self):
-        # SIGTERM — скрипт сам вернёт прежнее содержимое дисплея. Ждём, пока он завершится: иначе следующий
-        # режим успеет запомнить себе «прежний» дисплей раньше, чем тот восстановлен.
-        self.adb.shell("f=/tmp/webpanel_display.sd; if [ -f $f ]; then p=$(cat $f); kill $p 2>/dev/null; "
-                       "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 $p 2>/dev/null || break; "
-                       "usleep 100000; done; rm -f $f; fi; true")
-        # «показать один раз» скрипта не запускает — возвращаем по его снимку
-        self.adb.shell(f"{clock_restore_sh()}\nclock_restore {DISPLAY_ONCE}; rm -f {DISPLAY_ONCE}; true")
-        return {"mode": None}
-
-    def clock_frames(self, name):
-        if name not in self.patterns()["clock"]:
-            raise AdbError("нет такого паттерна")
-        return decode_clock_pattern(name, self.adb.read_bytes(self._pattern_path("clock", name)))
-
-    def stop_pattern(self, kind=None):
-        kinds = [kind] if kind else list(PATTERNS)
-        cmd = "; ".join(f"for f in /tmp/webpanel_{k}.pid /tmp/webpanel_{k}.sd; do "
-                        f"[ -f $f ] && kill $(cat $f) 2>/dev/null; rm -f $f; done" for k in kinds)
-        if "ring" in kinds:
-            cmd += "; " + RING_TRIGGER_CMD
-        self.adb.shell(cmd + "; true")
-        return {"ok": True}
-
-    def ring_reset(self):
-        """Отдать кольцо Алисе. Quasar рисует его через /dev/fb0 («YNDX LED ring», 3×1 BGR), а до светодиодов
-        картинка доходит через LED-триггер led_ring_fb. Запись 0 в sysfs brightness снимает триггер (так устроено
-        ядро) — после этого кольцо «мёртвое». Возвращаем триггер и гасим наш кадр."""
-        self.stop_pattern("ring")
-        self.adb.shell(RING_TRIGGER_CMD + "; " + ring_fb_cmd([(0, 0, 0)] * 3))
-        return {"ok": True, "leds": [[0, 0, 0]] * 3}
-
-    def ring(self, data):
-        """Цвет пишем во framebuffer, как это делает сам Quasar: он остаётся до следующего рисунка Алисы
-        (громкость, ответ, слушание) и не перебивает его."""
-        rgb = tuple(max(0, min(255, int(data.get(c, 0)))) for c in ("red", "green", "blue"))
-        self.stop_pattern("ring")
-        self.adb.shell(RING_TRIGGER_CMD + "; " + ring_fb_cmd([rgb] * 3))
-        return {"ok": True}
-
-    def led(self, d):
-        """LED-панель Станции 2 через штатную led-play. Генерируем .led-кадр/анимацию, кладём на
-        колонку и крутим `led-play -r` в фоне (переживает закрытие вкладки и перебивает прошивку).
-          frame {tokens:[RRGGBBWW×84]} — удерживать нарисованный кадр
-          off                          — удерживать чёрный (гаснет)
-          anim {kind, color:[r,g,b]}   — rainbow/pulse/chase
-          play {name|args:[name]}      — штатный .led из ledpatterns/panel
-          stop / release               — отдать панель Алисе"""
-        cmd = str(d.get("cmd", "")).strip()
-        with _LED_LOCK:
-            if cmd in ("stop", "release"):
-                self.adb.shell(LED_STOP_SH)
-                return {"ok": True, "running": False}
-            if cmd == "play":
-                name = str(d.get("name") or (d.get("args") or [""])[0])
-                if not re.match(r"^[A-Za-z0-9_]+\.led$", name):
-                    raise AdbError("плохое имя анимации")
-                self._led_launch(f"{LED_PANEL_DIR}/{name}")
-                return {"ok": True, "cmd": "play", "name": name, "running": True}
-            if cmd == "off":
-                text = _led_line([(0, 0, 0, 0)] * 88)
-            elif cmd == "frame":
-                text = " ".join(_led_validate_tokens(d.get("tokens"))) + " %x\n" % LED_HOLD_MS
-            elif cmd == "anim":
-                text = _led_anim_text(str(d.get("kind", "")), d.get("color"))
-            else:
-                raise AdbError("недопустимая команда LED")
-            self._led_push(text)
-            self._led_launch(LED_FRAME)
-            return {"ok": True, "cmd": cmd, "running": True}
-
-    def led_gif(self, body):
-        """Проиграть пользовательский GIF на панели штатной led-play -g (зациклено)."""
-        if not body or body[:4] != b"GIF8":
-            raise AdbError("это не GIF")
-        if len(body) > 4 * 1024 * 1024:
-            raise AdbError("слишком большой GIF (>4 МБ)")
-        with _LED_LOCK:
-            with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as f:
-                f.write(body)
-                local = f.name
-            try:
-                self.adb.push(local, LED_GIF)
-            finally:
-                os.remove(local)
-            self.adb.shell(LED_STOP_SH)
-            self.adb.shell(f"rm -f {LED_SD}; start-stop-daemon -S -b -m -p {LED_SD} "
-                           f"-x {LP} -- -g {shlex.quote(LED_GIF)} -r -d {LED_DEV}")
-        return {"ok": True, "running": True}
-
-    def _led_push(self, text):
-        """Положить .led-текст на колонку в LED_FRAME (мелкое — через printf, крупное — push файла)."""
-        if len(text) < 3000:
-            self.adb.shell(f"printf '%s' {shlex.quote(text)} > {LED_FRAME}")
-        else:
-            with tempfile.NamedTemporaryFile("w", suffix=".led", delete=False) as f:
-                f.write(text)
-                local = f.name
-            try:
-                self.adb.push(local, LED_FRAME)
-            finally:
-                os.remove(local)
-
-    def _led_launch(self, ledfile):
-        """Снять прежнюю отрисовку и зациклить led-play по ledfile в фоне."""
-        self.adb.shell(LED_STOP_SH)
-        self.adb.shell(f"rm -f {LED_SD}; start-stop-daemon -S -b -m -p {LED_SD} "
-                       f"-x {LP} -- -l {shlex.quote(ledfile)} -r -d {LED_DEV}")
-
-    def led_patterns(self):
-        # через find, а не ls: adb shell идёт по pty и ls красит вывод ANSI + колонками
-        out, _, _ = self.adb.shell(f"find {QUASAR}/ledpatterns/panel -maxdepth 1 -type f -name '*.led' 2>/dev/null",
-                                   check=False)
-        return {"patterns": sorted(posixpath.basename(l.strip()) for l in out.split("\n") if l.strip().endswith(".led"))}
-
-    def clock(self, data):
-        if "v" in data:
-            v = [max(0, min(255, int(x))) for x in data["v"]]
-            if len(v) != len(CLOCK_LEDS):
-                raise AdbError(f"нужно {len(CLOCK_LEDS)} значений")
-            self.stop_pattern("clock")
-            self.display_stop()
-            self.adb.shell(self._once_snapshot() + "; ".join(f"echo {val} > {clock_path()}{n}/brightness"
-                                                             for n, val in zip(CLOCK_LEDS, v)))
-            return {"ok": True}
-        text = str(data.get("text", "")).upper()
-        bright = max(0, min(255, int(data.get("brightness", 160))))
-        # Точку прикрепляем к предыдущему символу.
-        cells = []
-        for ch in text:
-            if ch == "." and cells:
-                cells[-1] = (cells[-1][0], True)
-            else:
-                cells.append((ch, False))
-        cells = (cells + [(" ", False)] * 4)[:4]
-        cmds = []
-        for pos, (ch, dot) in enumerate(cells):
-            on = set(SEGMENTS.get(ch, "")) | ({"H"} if dot else set())
-            for seg in "ABCDEFGH":
-                cmds.append(f"echo {bright if seg in on else 0} > {clock_path()}{seg}{pos}/brightness")
-        for extra in ("DEGREE", "DH", "DL", "DM"):
-            v = bright if data.get(extra.lower()) else 0
-            cmds.append(f"echo {v} > {clock_path()}{extra}/brightness")
-        self.adb.shell(self._once_snapshot() + "; ".join(cmds))
-        return {"ok": True}
-
-    def clock_state(self):
-        # Что сейчас горит на дисплее и кольце — для 3D-модели в «Обзоре».
-        ring = [f"plum:{c}:ring{i}/brightness" for i in (1, 2, 3) for c in ("red", "green", "blue")]
-        out, _, _ = self.adb.shell("cd /sys/class/leds && cat " + " ".join(
-            [f"{LED_PREFIX}:white:clock{n}/brightness" for n in CLOCK_LEDS] + ring))
-        v = [int(x) for x in out.split()]
-        if len(v) != len(CLOCK_LEDS) + len(ring):
-            raise AdbError("не удалось прочитать светодиоды")
-        r = v[len(CLOCK_LEDS):]
-        return {"v": v[:len(CLOCK_LEDS)], "ring": [r[0:3], r[3:6], r[6:9]]}
-
-    def ring_frames(self, name):
-        if name not in self.patterns()["ring"]:
-            raise AdbError("нет такого паттерна")
-        return parse_led(self.adb.read_bytes(self._pattern_path("ring", name)).decode("utf-8", "replace"))
-
-    # ---------- свои анимации: подмена файлов ledpatterns, как у звуков ----------
-    def _anim_paths(self, kind, name):
-        if kind not in PATTERNS or name not in self.patterns()[kind] or name.startswith("my/"):
-            raise AdbError("нет такой анимации")
-        target = f"{PATTERNS[kind]}/{name}"
-        return target, f"{OVR_DIR}/{posixpath.relpath(target, QUASAR)}"
-
-    def anim_custom(self):
-        out, _, _ = self.adb.shell(
-            f"cd {OVR_DIR}/ledpatterns 2>/dev/null && find . -type f; [ -f {BOOT_CUSTOM} ] && echo @boot; true", check=False)
-        res = {kind: [] for kind in PATTERNS}
-        dirs = {posixpath.basename(d): kind for kind, d in PATTERNS.items()}
-        for line in strip_ansi(out).split():
-            if line == "@boot":
-                res["clock"].append(posixpath.basename(BOOT_TARGET))
-            elif line.startswith("./") and line.count("/") == 2 and line.split("/")[1] in dirs:
-                res[dirs[line.split("/")[1]]].append(line.split("/")[2])
-        return {k: sorted(v) for k, v in res.items()}
-
-    def anim_original(self, kind, name):
-        target, _ = self._anim_paths(kind, name)
-        if target == BOOT_TARGET:   # у заставки копия оригинала своя, со времён вкладки «Запуск»
-            return {"frames": self.boot_status().get("default") or []}
-        data = self._original_bytes(target)
-        if kind == "clock":
-            return {"frames": decode_clock_pattern(name, data)}
-        return parse_led(data.decode("utf-8", "replace"))
-
-    def anim_install(self, kind, name, frames=None, text=None):
-        target, custom = self._anim_paths(kind, name)
-        if kind == "clock":
-            if not isinstance(frames, list) or not frames:
-                raise AdbError("нет кадров")
-            if target == BOOT_TARGET:
-                self.boot_install(frames)
-            else:
-                data = encode_clock_pattern(frames)
-                self._install_override(zstd_compress(data) if name.endswith(".zst") else data, custom, target)
-        else:
-            self._install_override(check_led(text).encode(), custom, target)
-        return self.anim_custom()
-
-    def anim_reset(self, kind, name):
-        target, custom = self._anim_paths(kind, name)
-        if target == BOOT_TARGET:
-            self.boot_reset()
-        else:
-            self._remove_override(custom, target)
-        return self.anim_custom()
-
-    def ring_try(self, text, seconds):
-        """Проиграть анимацию кольца из редактора, ничего не устанавливая."""
-        path = "/tmp/webpanel_ring_try.led"
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "a.led"
-            f.write_bytes(check_led(text).encode())
-            self.adb.push(f, path)
-        self._run_timed("ring", f"{QRUN}/led_util {path}", seconds)
-        return {"ok": True}
-
-    # ---------- запуск: заставка часов и звук ----------
-    def boot_status(self):
-        q = shlex.quote
-        out, _, _ = self.adb.shell(
-            f"[ -f {BOOT_TARGET} ] && echo target; [ -f {BOOT_CUSTOM} ] && echo custom; [ -f {BOOT_ORIG} ] && echo orig; "
-            f"grep -q ' {BOOT_TARGET} ' /proc/mounts && echo mounted; "
-            f"[ -f {SOUND_TARGET} ] && echo s_target; [ -f {SOUND_CUSTOM} ] && echo s_custom; "
-            f"grep -q ' {SOUND_TARGET} ' /proc/mounts && echo s_mounted; "
-            f"{hook_active()} && echo hook; "
-            f"[ -f {NO_BOOT_SOUND} ] && echo nosound; [ -f {BOOT_ALWAYS} ] && echo always; true")
-        flags = set(out.split())
-        res = {"supported": "target" in flags, "custom": "custom" in flags, "mounted": "mounted" in flags,
-               "sound_supported": "s_target" in flags, "sound_custom": "s_custom" in flags,
-               "sound_mounted": "s_mounted" in flags,
-               "hook": "hook" in flags, "no_boot_sound": "nosound" in flags, "always": "always" in flags}
-        if res["supported"]:
-            # Пока поверх стандартного файла смонтирован свой, стандартный берём из сохранённой копии.
-            if not res["mounted"]:
-                res["default"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_TARGET))
-            elif "orig" in flags:
-                res["default"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_ORIG))
-            else:
-                res["default"] = []
-            if res["custom"]:
-                res["frames"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_CUSTOM))
-        return res
-
-    def _ensure_hook(self):
-        """Кладёт свежий хук и подключает его к rootkeeper.sh.
-
-        rootkeeper.sh запускается из onboot.sh раньше, чем Quasar читает анимации и звуки, — это
-        единственная точка запуска при загрузке, которая живёт в /data. Перед правкой сохраняем копию.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            write_unix(Path(td) / "hook", BOOT_HOOK_SCRIPT)
-            self.adb.shell(f"mkdir -p {WEB_DIR}")
-            self.adb.push(Path(td) / "hook", BOOT_HOOK)
-        _, err, rc = self.adb.shell(
-            f"chmod 755 {BOOT_HOOK}; "
-            f"if [ -f {ROOTKEEPER} ] || grep -q {ROOTKEEPER} {ROOTKEEPER_CALLER} 2>/dev/null; then "
-            f"[ -f {ROOTKEEPER} ] || {{ "
-            f"printf '#!/bin/sh\\n# создан веб-панелью: штатный onboot.sh запускает этот файл, если он есть\\n' > {ROOTKEEPER} "
-            f"&& chmod 755 {ROOTKEEPER} && touch {ROOTKEEPER_CREATED} || exit 4; }}; "
-            f"[ -f {ROOTKEEPER}.webpanel.bak ] || cp {ROOTKEEPER} {ROOTKEEPER}.webpanel.bak; "
-            f"grep -q '{HOOK_MARK}' {ROOTKEEPER} || "
-            f"sed -i '1a [ -x {BOOT_HOOK} ] && {BOOT_HOOK} {HOOK_MARK}' {ROOTKEEPER}; "
-            f"elif {initd_writable()}; then "
-            f"grep -q '{HOOK_MARK}' {INITD_HOOK} 2>/dev/null || "
-            f"{{ printf '%s' {shlex.quote(initd_hook_script())} > {INITD_HOOK} && chmod 755 {INITD_HOOK}; }} || exit 4; "
-            f"else exit 3; fi", check=False)
-        if rc == 3:
-            raise AdbError(f"нет {ROOTKEEPER}, штатная загрузка ({ROOTKEEPER_CALLER}) его не вызывает, а /etc/init.d "
-                           "только для чтения: подключить к загрузке не к чему")
-        if rc != 0:
-            raise AdbError(err.strip() or "не удалось подключить хук к загрузке")
-
-    # Что держится на хуке: без него после перезагрузки колонки пропадает
-    HOOK_USERS = (("заставка", BOOT_CUSTOM), ("звук запуска", SOUND_CUSTOM), ("заставка при каждой загрузке", BOOT_ALWAYS),
-                  ("автозапуск yamd", YAM_AUTOSTART), ("будильник", ALARM_CONF), ("блокировка аналитики", HOSTS_CUSTOM),
-                  ("ассистент", ASSIST_CONF), ("звук через Bluetooth-колонку", BTOUT_MAC))
-
-    def _hook_users_script(self):
-        """Печатает по строке на каждую функцию, которой нужен хук."""
-        return ("; ".join(f"[ -f {path} ] && echo {shlex.quote('@' + name)}" for name, path in self.HOOK_USERS)
-                + f"; find {OVR_DIR}/sounds -type f 2>/dev/null | grep -q . && echo '@свои звуки'"
-                + f"; find {OVR_DIR}/ledpatterns -type f 2>/dev/null | grep -q . && echo '@свои анимации'"
-                + f"; find {YAM2_SVC_DIR}/boot -type f 2>/dev/null | grep -q . && echo '@автозапуск служб yam'")
-
-    def hook_status(self):
-        """Подключён ли хук, свежий ли он и нужен ли — для общей плашки «не переживёт перезагрузку»."""
-        out, _, _ = self.adb.shell(
-            f"{self._hook_users_script()}; {hook_active()} && echo hook; grep -q '{HOOK_MARK}' {INITD_HOOK} 2>/dev/null && echo initd; "
-            f"{{ [ -f {ROOTKEEPER} ] || grep -q {ROOTKEEPER} {ROOTKEEPER_CALLER} 2>/dev/null || {initd_writable()}; }} && echo possible; "
-            f"md5sum {BOOT_HOOK} 2>/dev/null; true", check=False)
-        out = strip_ansi(out)
-        flags = set(out.split())
-        users = [l.strip()[1:] for l in out.splitlines() if l.strip().startswith("@")]
-        hook = "hook" in flags
-        fresh = hashlib.md5(BOOT_HOOK_SCRIPT.encode()).hexdigest() in out
-        return {"hook": hook, "fresh": hook and fresh, "users": users, "possible": "possible" in flags,
-                "broken": bool(users) and not (hook and fresh), "rootkeeper": ROOTKEEPER,
-                "file": INITD_HOOK if "initd" in flags else ROOTKEEPER}
-
-    def hook_repair(self):
-        self._ensure_hook()
-        return self.hook_status()
-
-    def _drop_hook_if_unused(self):
-        # Хук нужен, пока есть хоть что-то своё; иначе возвращаем rootkeeper.sh к исходному виду.
-        self.adb.shell(
-            f"if [ -z \"$({self._hook_users_script()})\" ]; then "
-            f"{hook_drop()}; rm -f {BOOT_HOOK}; fi; true")
-
-    def _install_override(self, data, custom, target, orig=None):
-        """Кладёт свой файл и сразу монтирует его поверх стандартного. orig — копия оригинала (для заставки и звука
-        запуска, по старинке); остальным она не нужна: оригинал под подменой цел, его читает _original_bytes."""
-        with tempfile.TemporaryDirectory() as td:
-            (Path(td) / "f").write_bytes(data)
-            q = shlex.quote
-            self.adb.shell(f"mkdir -p {q(posixpath.dirname(custom))}" + (
-                f"; grep -q ' {target} ' /proc/mounts || [ -f {orig} ] || cp {target} {orig}" if orig else ""))
-            self.adb.push(Path(td) / "f", custom)
-        self._ensure_hook()
-        q = shlex.quote
-        _, err, rc = self.adb.shell(f"grep -q ' {target} ' /proc/mounts || mount --bind {q(custom)} {q(target)}", check=False)
-        if rc != 0:
-            raise AdbError(err.strip() or "не удалось подменить файл")
-
-    def _remove_override(self, custom, target):
-        q = shlex.quote
-        self.adb.shell(f"grep -q ' {target} ' /proc/mounts && {{ umount {q(target)} || umount -l {q(target)}; }}; "
-                       f"rm -f {q(custom)}; [ -d {OVR_DIR} ] && find {OVR_DIR} -depth -type d -exec rmdir {{}} \\; 2>/dev/null; true")
-        self._drop_hook_if_unused()
-
-    def _original_bytes(self, target):
-        """Стандартный файл, даже когда поверх смонтирован свой: bind его папки без вложенных монтирований
-        (mount --bind не рекурсивный) показывает то, что лежит под подменой."""
-        q = shlex.quote
-        out, _, _ = self.adb.shell(f"grep -q ' {target} ' /proc/mounts && echo mounted; true", check=False)
-        if "mounted" not in out:
-            return self.adb.read_bytes(target)
-        tmp = "/tmp/webpanel_orig.bin"
-        _, err, rc = self.adb.shell(
-            f"d=/tmp/webpanel_orig.d; mkdir -p $d && mount --bind {q(posixpath.dirname(target))} $d && "
-            f"cp $d/{q(posixpath.basename(target))} {tmp}; rc=$?; umount $d 2>/dev/null; rmdir $d; exit $rc", check=False)
-        if rc:
-            raise AdbError(err.strip() or "не удалось прочитать стандартный файл")
-        try:
-            return self.adb.read_bytes(tmp)
-        finally:
-            self.adb.shell(f"rm -f {tmp}", check=False)
-
-    def boot_install(self, frames):
-        if not self.boot_status()["supported"]:
-            raise AdbError(f"на этой прошивке нет {BOOT_TARGET}")
-        self._install_override(zstd_compress(encode_clock_pattern(frames)), BOOT_CUSTOM, BOOT_TARGET, BOOT_ORIG)
-        return self.boot_status()
-
-    def boot_reset(self):
-        self._remove_override(BOOT_CUSTOM, BOOT_TARGET)
-        return self.boot_status()
-
-    def boot_sound_install(self, filename, body):
-        if not self.ffmpeg:
-            raise AdbError("для смены звука нужен ffmpeg на компьютере")
-        if not self.boot_status()["sound_supported"]:
-            raise AdbError(f"на этой прошивке нет {SOUND_TARGET}")
-        # Тот же формат, что у оригинала: MP3 44,1 кГц стерео.
-        p = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn",
-                            "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "192k",
-                            "-map_metadata", "-1", "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"],
-                           input=body, capture_output=True, timeout=300)
-        if p.returncode != 0 or not p.stdout:
-            raise AdbError("ffmpeg: " + p.stderr.decode("utf-8", "replace").strip()[-400:])
-        self._install_override(p.stdout, SOUND_CUSTOM, SOUND_TARGET, SOUND_ORIG)
-        return self.boot_status()
-
-    def boot_sound_reset(self):
-        self._remove_override(SOUND_CUSTOM, SOUND_TARGET)
-        return self.boot_status()
-
-    def boot_sound_play(self, which):
-        st = self.boot_status()
-        if which == "custom":
-            if not st["sound_custom"]:
-                raise AdbError("свой звук не установлен")
-            path = SOUND_CUSTOM
-        else:
-            path = SOUND_ORIG if st["sound_mounted"] else SOUND_TARGET
-        return self._play_path(path)
-
-    def boot_always(self, enabled):
-        if enabled:
-            self._ensure_hook()
-            self.adb.shell(f"touch {BOOT_ALWAYS}")
-        else:
-            self.adb.shell(f"rm -f {BOOT_ALWAYS}")
-            self._drop_hook_if_unused()
-        return self.boot_status()
-
-    # ---------- YAM: менеджер пакетов ----------
-    _yam_port = None
-    _registry = (0, None)
-
-    # ---------- что панель оставила на колонке ----------
-    # ---------- блокировка аналитики ----------
-    def privacy_status(self):
-        out, _, _ = self.adb.shell(
-            f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && echo mounted; [ -f {HOSTS_CUSTOM} ] && echo custom; "
-            f"echo queued=$(cat {METRICA_BATCH} 2>/dev/null | wc -c); md5sum {BOOT_HOOK} 2>/dev/null; "
-            # проверка на деле: куда сейчас ведёт адрес аналитики
-            f"ping -c 1 -W 1 {ANALYTICS_HOSTS[0]} 2>&1 | head -n 1; true", check=False, timeout=15)
-        out = strip_ansi(out)
-        enabled = "mounted" in out and "custom" in out
-        # хук от прошлой версии панели не умеет чистить очередь — обновляем
-        if enabled and hashlib.md5(BOOT_HOOK_SCRIPT.encode()).hexdigest() not in out:
-            self._ensure_hook()
-        m = re.search(r"queued=(\d+)", out)
-        return {"enabled": enabled, "hosts": list(ANALYTICS_HOSTS), "queued": int(m.group(1)) if m else 0,
-                "blocked": f"({ANALYTICS_HOSTS[0]}" not in out and "127.0.0.1" in out}
-
-    def privacy_set(self, enabled):
-        if not enabled:
-            # сначала очередь: как только адреса откроются, телеметрия отправила бы всё, что накопилось
-            self.adb.shell(f"{ANALYTICS_PURGE}; true", check=False)
-            self.adb.shell(f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && {{ umount {HOSTS_TARGET} || umount -l {HOSTS_TARGET}; }}; "
-                           f"rm -f {HOSTS_CUSTOM}; true")
-            self._drop_hook_if_unused()
-            return self.privacy_status()
-        # основа — настоящий системный /etc/hosts (если наш уже подключён, сначала снимаем его)
-        self.adb.shell(f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && umount {HOSTS_TARGET}; true")
-        base = strip_ansi(self.adb.read_bytes(HOSTS_TARGET).decode("utf-8", "replace")).replace("\r\n", "\n")
-        lines = [ln for ln in base.splitlines() if ln.strip()]
-        text = "\n".join(lines + ["", HOSTS_MARK] + [f"127.0.0.1\t{h}" for h in ANALYTICS_HOSTS]) + "\n"
-        with tempfile.TemporaryDirectory() as td:
-            f = Path(td) / "hosts"
-            write_unix(f, text)
-            self.adb.shell(f"mkdir -p {WEB_DIR}")
-            self.adb.push(f, HOSTS_CUSTOM)
-        self._ensure_hook()
-        _, err, rc = self.adb.shell(f"chmod 644 {HOSTS_CUSTOM}; mount --bind {HOSTS_CUSTOM} {HOSTS_TARGET}", check=False)
-        if rc:
-            raise AdbError("не удалось подключить свой /etc/hosts: " + strip_ansi(err).strip()[-200:])
-        self.privacy_purge()
-        return self.privacy_status()
-
-    def privacy_purge(self):
-        """Удалить накопленную неотправленную аналитику (только при включённой блокировке — иначе незачем)."""
-        self.adb.shell(f"[ -f {HOSTS_CUSTOM} ] && {{ {ANALYTICS_PURGE}; }}; true", check=False)
-        time.sleep(2)   # launcher перезапускает телеметрию
-        return self.privacy_status()
-
-    # ---------- свой голосовой помощник ----------
     ASSIST_FIELDS = {"llm": ("base_url", "model", "system_prompt", "max_tokens", "history", "proxy"),
                      "tts": ("provider", "base_url", "model", "voice", "speed"),
                      "led": ("enabled", "color"),
@@ -2295,12 +1464,12 @@ echo @@BLUEZ
         4) готовая сборка другой версии — лучше, чем ничего."""
         build = ASSIST_SRC / "build" / "assistantd"
         go = shutil.which("go")
-        if go:
+        if go and download:
             sources = list(ASSIST_SRC.glob("*.go")) + [ASSIST_SRC / "go.mod"]
             fresh = build.exists() and all(f.stat().st_mtime <= build.stat().st_mtime for f in sources if f.exists())
             if not fresh:
                 env = {**os.environ, "CGO_ENABLED": "0", "GOOS": "linux", "GOARCH": "arm64"}
-                r = subprocess.run([go, "build", "-trimpath", "-ldflags", f"-s -w -X main.version={VERSION}",
+                r = subprocess.run([go, "build", "-trimpath", "-ldflags", f"-s -w -X main.version={UPSTREAM_VERSION}",
                                     "-o", str(build), "."], cwd=ASSIST_SRC, env=env, capture_output=True, text=True, timeout=300)
                 if r.returncode:
                     raise AdbError("не удалось собрать помощника: " + (r.stderr or r.stdout).strip()[-400:])
@@ -2309,9 +1478,9 @@ echo @@BLUEZ
             bundled = (ASSIST_SRC / "build" / "VERSION").read_text().strip()
         except OSError:
             bundled = ""
-        if build.exists() and bundled == VERSION:
+        if build.exists() and bundled == UPSTREAM_VERSION:
             return build
-        cached = DATA_DIR / f".assistantd-{VERSION}"
+        cached = DATA_DIR / f".assistantd-{UPSTREAM_VERSION}"
         if cached.exists():
             return cached
         if download:
@@ -2319,15 +1488,15 @@ echo @@BLUEZ
                 return self._assist_download(cached)
             except (OSError, ValueError, AdbError) as e:
                 if not build.exists():
-                    raise AdbError(f"не удалось скачать помощника для версии {VERSION}: {e}") from None
+                    raise AdbError(f"не удалось скачать помощника для версии {UPSTREAM_VERSION}: {e}") from None
         if build.exists():
             return build
         raise AdbError("нет программы помощника для колонки: она скачивается с релиза GitHub — проверьте интернет")
 
     def _assist_download(self, dest):
-        base = f"https://github.com/{REPO}/releases/download/v{VERSION}/"
+        base = f"https://github.com/{REPO}/releases/download/v{UPSTREAM_VERSION}/"
         get = lambda name, limit: urllib.request.urlopen(urllib.request.Request(
-            base + name, headers={"User-Agent": f"yandex-station-web/{VERSION}"}), timeout=60).read(limit)
+            base + name, headers={"User-Agent": f"yandex-station-web/{UPSTREAM_VERSION}"}), timeout=60).read(limit)
         sums = get("SHA256SUMS", 64 * 1024).decode("utf-8", "replace")
         want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[-1:] == [self.ASSIST_ASSET]), None)
         if not want:
@@ -2382,6 +1551,7 @@ echo @@BLUEZ
             sec = cfg.setdefault(part, {})
             sec["key"] = cfg["keys"].get(self._key_id(sec.get("base_url", "")), "")
         running = "running" in flags
+        self.assistant_ready = running and bool(cfg.get("enabled"))
         local = self._assist_local_md5() if "installed" in flags else None
         return {"supported": True, "installed": "installed" in flags, "running": running, "config": cfg,
                 "outdated": bool(local) and local not in out,
@@ -2393,7 +1563,10 @@ echo @@BLUEZ
             raise AdbError(f"ядро колонки {strip_ansi(arch).strip() or '?'}: программа помощника пока собрана "
                            "только под 64-битное (aarch64)")
         binary = self._assist_binary()
-        self.adb.shell(f"mkdir -p {ASSIST_DIR}; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; true", check=False)
+        check = self.yam2_preflight()
+        if not check['compatible']:
+            raise AdbError('Недостаточно ресурсов для помощника')
+        self.adb.shell(f"mkdir -p {ASSIST_DIR}; [ ! -f {ASSISTD} ] || cp {ASSISTD} {ASSISTD}.bak.{time.time_ns()}; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; true", check=False)
         self.adb.push(binary, ASSISTD + ".new", timeout=300)
         self.adb.shell(f"chmod 755 {ASSISTD}.new; mv {ASSISTD}.new {ASSISTD}")
         if not self._assist_config():
@@ -2402,7 +1575,9 @@ echo @@BLUEZ
             self._ensure_hook()
         except AdbError:
             pass   # хук поставить нельзя (нет rootkeeper.sh): помощник работает до перезагрузки колонки
-        return self.assistant_start()
+        result = self.assistant_start()
+        result['autostart_supported'] = False
+        return result
 
     def _assist_write(self, cfg):
         with tempfile.TemporaryDirectory() as td:
@@ -2515,15 +1690,15 @@ echo @@BLUEZ
         text = re.sub(r"[\x00-\x1f]", " ", str(text or "")).strip()
         if not 1 <= len(text) <= 300:
             raise AdbError("текст — от 1 до 300 символов")
-        if voice == "assistant":
-            return self.assistant_command({"say": text})
+        if voice != "alice":
+            raise AdbError("Доступен только голос Алисы")
         # текст — файлом: в команду оболочки он не попадает
-        path = "/tmp/webpanel_say.txt"
+        path = "/tmp/webpanel_say_" + os.urandom(8).hex() + ".txt"
         with tempfile.TemporaryDirectory() as td:
             f = Path(td) / "say"
             f.write_text("Повтори за мной: " + text + "\n", encoding="utf-8")
             self.adb.push(f, path)
-        self.detach("say", f"t=$(cat {path}); rm -f {path}; "
+        self.detach("say_" + os.urandom(4).hex(), f"t=$(cat {path}); rm -f {path}; "
                            f"{{ sleep 2; printf 'q\\n'; sleep 0.5; printf '%s\\n' \"$t\"; sleep 3; printf 'x\\n'; sleep 1; }} "
                            f"| {QRUN}/maind --cli >/dev/null 2>&1")
         return {"ok": True}
@@ -2534,9 +1709,6 @@ echo @@BLUEZ
             raise AdbError("вопрос — от 1 до 1000 символов")
         return self.assistant_command({"ask": text})
 
-    # ---------- радио ----------
-    # Свои станции играет та же программа на колонке, что и ассистент (device/assistant/radio.go): встроенный
-    # в прошивку GStreamer, без компьютера. Станции Алисы — обычный текстовый запрос «включи радио …».
     RADIO_URL = re.compile(r"https?://[^\s\"'\\!]{3,490}")
     RADIO_SEARCH = "https://all.api.radio-browser.info/json/stations/search"
 
@@ -2634,6 +1806,7 @@ echo @@BLUEZ
             r = opener.open(urllib.request.Request(url, headers={"User-Agent": f"yandex-station-web/{VERSION}"}), timeout=5)
         except urllib.error.HTTPError as e:
             result.update(state="down", detail=f"сервер ответил {e.code}")
+            e.close()
         except (OSError, ValueError) as e:
             result.update(state="down", detail=f"не отвечает: {e}")
         else:
@@ -2832,8 +2005,454 @@ echo @@BLUEZ
     def assistant_remove(self):
         self.adb.shell(f"start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; sleep 0.5; "
                        f"rm -rf {ASSIST_DIR}; rm -f {ASSIST_SD} {ASSIST_STATUS} {ASSIST_CMD}; true", check=False)
-        self._drop_hook_if_unused()
+        # The existing Lite1 alarm-only hook is not owned by this module.
         return self.assistant_status()
+
+
+    def stop_sound(self):
+        self.adb.shell("killall aplay 2>/dev/null; true")
+        return {"ok": True}
+
+    # ---------- светодиоды ----------
+    def patterns(self):
+        res = {}
+        for kind, d in PATTERNS.items():
+            out, _, _ = self.adb.shell(f"ls {d}")
+            res[kind] = sorted(strip_ansi(out).split())
+        return res
+
+    def play_pattern(self, kind, name, seconds):
+        if kind not in PATTERNS or name not in self.patterns()[kind]:
+            raise AdbError("нет такого паттерна")
+        path = f"{PATTERNS[kind]}/{name}"
+        if kind == "clock":
+            return self.play_clock(decode_clock_pattern(name, self.adb.read_bytes(path)), seconds)
+        self._run_timed(kind, f"{QRUN}/led_util {shlex.quote(path)}", seconds)
+        return {"ok": True}
+
+    def _run_timed(self, kind, cmd, seconds):
+        # Ни led_util, ни зацикленные анимации не завершаются сами — запускаем в фоне и убиваем по таймеру.
+        seconds = max(1, min(600, int(seconds)))
+        pidf = f"/tmp/webpanel_{kind}.pid"
+        self.stop_pattern(kind)
+        self.detach(kind, f"{cmd} >/dev/null 2>&1 & p=$!; echo $p > {pidf}; "
+                          f"sleep {seconds}; kill $p 2>/dev/null; rm -f {pidf}")
+
+    def play_clock(self, frames, seconds):
+        frames = decode_clock_pattern(".binscled", encode_clock_pattern(frames))  # нормализуем ввод клиента
+        self.display_stop()
+        script = "/tmp/webpanel_clock_anim.sh"
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "anim.sh"
+            write_unix(f, clock_player_script(frames))
+            self.adb.push(f, script)
+        self._run_timed("clock", f"sh {script}", seconds)
+        return {"ok": True, "frames": len(frames)}
+
+    # ---------- «закреплённый» дисплей часов ----------
+    def display_status(self):
+        out, _, _ = self.adb.shell(f"[ -f /tmp/webpanel_display.sd ] && kill -0 $(cat /tmp/webpanel_display.sd) 2>/dev/null "
+                                   f"&& cat {DISPLAY_MODE} 2>/dev/null; true")
+        parts = out.split()
+        if not parts:
+            return {"mode": None}
+        res = {"mode": parts[0]}
+        if parts[0] == "timer" and len(parts) > 1:
+            dev_now, _, _ = self.adb.shell("date +%s")
+            res["left"] = max(0, int(parts[1]) - int(dev_now.strip() or 0))
+        return res
+
+    def display_set(self, d):
+        mode = d.get("mode")
+        bright = max(1, min(255, int(d.get("brightness", 160))))
+        frame, seconds = None, 0
+        if mode == "frame":
+            frame = [max(0, min(255, int(x))) for x in d["v"]]
+            if len(frame) != len(CLOCK_LEDS):
+                raise AdbError(f"нужно {len(CLOCK_LEDS)} значений")
+        elif mode == "timer":
+            seconds = max(1, min(99 * 60 + 59, int(d["seconds"])))
+        elif mode not in ("date", "temp"):
+            raise AdbError("неизвестный режим дисплея")
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "display.sh"
+            write_unix(f, display_script(mode, frame, seconds, bright))
+            self.adb.push(f, DISPLAY_SCRIPT)
+            if mode == "timer":
+                self._prepare_timer_sound(Path(td))
+        self.display_stop()
+        self.stop_pattern("clock")
+        self.detach("display", f"exec sh {DISPLAY_SCRIPT}")
+        # Скрипт пишет свой mode-файл не мгновенно — отвечаем сразу тем, что запустили.
+        return {"mode": mode, **({"left": seconds} if mode == "timer" else {})}
+
+    def _prepare_timer_sound(self, td):
+        """sounds/*/timer.wav у Quasar на деле Ogg/Opus — aplay его не играет. Один раз перекодируем в WAV."""
+        out, _, _ = self.adb.shell(f"[ -f {TIMER_SOUND} ] && echo have; true")
+        if "have" in out or not self.ffmpeg:
+            return
+        src = next((f"{SOUNDS_DIR}/{n}" for n in self.sounds() if n.endswith("/timer.wav") or n == "timer.wav"), None)
+        if not src:
+            return
+        dst = td / "timer.wav"
+        r = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-ac", "2", "-ar", "48000",
+                            "-sample_fmt", "s16", "-y", str(dst)], input=self.adb.read_bytes(src), capture_output=True, **_SUBPROCESS_WINDOW_OPTIONS)
+        if r.returncode == 0:
+            self.adb.push(dst, TIMER_SOUND)
+
+    @staticmethod
+    def _once_snapshot():
+        """Перед «показать один раз» запоминаем дисплей (если снимка ещё нет — повторные «один раз» не затирают часы)."""
+        return f"{clock_restore_sh()}\n[ -f {DISPLAY_ONCE} ] || snap_save {DISPLAY_ONCE}\n"
+
+    def display_stop(self):
+        # SIGTERM — скрипт сам вернёт прежнее содержимое дисплея. Ждём, пока он завершится: иначе следующий
+        # режим успеет запомнить себе «прежний» дисплей раньше, чем тот восстановлен.
+        self.adb.shell("f=/tmp/webpanel_display.sd; if [ -f $f ]; then p=$(cat $f); kill $p 2>/dev/null; "
+                       "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 $p 2>/dev/null || break; "
+                       "usleep 100000; done; rm -f $f; fi; true")
+        # «показать один раз» скрипта не запускает — возвращаем по его снимку
+        self.adb.shell(f"{clock_restore_sh()}\nclock_restore {DISPLAY_ONCE}; rm -f {DISPLAY_ONCE}; true")
+        return {"mode": None}
+
+    def clock_frames(self, name):
+        if name not in self.patterns()["clock"]:
+            raise AdbError("нет такого паттерна")
+        return decode_clock_pattern(name, self.adb.read_bytes(f"{PATTERNS['clock']}/{name}"))
+
+    def stop_pattern(self, kind=None):
+        kinds = [kind] if kind else list(PATTERNS)
+        cmd = "; ".join(f"for f in /tmp/webpanel_{k}.pid /tmp/webpanel_{k}.sd; do "
+                        f"[ -f $f ] && kill $(cat $f) 2>/dev/null; rm -f $f; done" for k in kinds)
+        if "ring" in kinds:
+            cmd += "; " + RING_TRIGGER_CMD
+        self.adb.shell(cmd + "; true")
+        return {"ok": True}
+
+    def ring_reset(self):
+        """Отдать кольцо Алисе. Quasar рисует его через /dev/fb0 («YNDX LED ring», 3×1 BGR), а до светодиодов
+        картинка доходит через LED-триггер led_ring_fb. Запись 0 в sysfs brightness снимает триггер (так устроено
+        ядро) — после этого кольцо «мёртвое». Возвращаем триггер и гасим наш кадр."""
+        self.stop_pattern("ring")
+        self.adb.shell(RING_TRIGGER_CMD + "; " + ring_fb_cmd([(0, 0, 0)] * 3))
+        return {"ok": True, "leds": [[0, 0, 0]] * 3}
+
+    def ring(self, data):
+        """Цвет пишем во framebuffer, как это делает сам Quasar: он остаётся до следующего рисунка Алисы
+        (громкость, ответ, слушание) и не перебивает его."""
+        rgb = tuple(max(0, min(255, int(data.get(c, 0)))) for c in ("red", "green", "blue"))
+        self.stop_pattern("ring")
+        self.adb.shell(RING_TRIGGER_CMD + "; " + ring_fb_cmd([rgb] * 3))
+        return {"ok": True}
+
+    def led(self, d):
+        """LED-панель Станции 2 через штатную led-play. Генерируем .led-кадр/анимацию, кладём на
+        колонку и крутим `led-play -r` в фоне (переживает закрытие вкладки и перебивает прошивку).
+          frame {tokens:[RRGGBBWW×84]} — удерживать нарисованный кадр
+          off                          — удерживать чёрный (гаснет)
+          anim {kind, color:[r,g,b]}   — rainbow/pulse/chase
+          play {name|args:[name]}      — штатный .led из ledpatterns/panel
+          stop / release               — отдать панель Алисе"""
+        cmd = str(d.get("cmd", "")).strip()
+        with _LED_LOCK:
+            if cmd in ("stop", "release"):
+                self.adb.shell(LED_STOP_SH)
+                return {"ok": True, "running": False}
+            if cmd == "play":
+                name = str(d.get("name") or (d.get("args") or [""])[0])
+                if not re.match(r"^[A-Za-z0-9_]+\.led$", name):
+                    raise AdbError("плохое имя анимации")
+                self._led_launch(f"{LED_PANEL_DIR}/{name}")
+                return {"ok": True, "cmd": "play", "name": name, "running": True}
+            if cmd == "off":
+                text = _led_line([(0, 0, 0, 0)] * 88)
+            elif cmd == "frame":
+                text = " ".join(_led_validate_tokens(d.get("tokens"))) + " %x\n" % LED_HOLD_MS
+            elif cmd == "anim":
+                text = _led_anim_text(str(d.get("kind", "")), d.get("color"))
+            else:
+                raise AdbError("недопустимая команда LED")
+            self._led_push(text)
+            self._led_launch(LED_FRAME)
+            return {"ok": True, "cmd": cmd, "running": True}
+
+    def led_gif(self, body):
+        """Проиграть пользовательский GIF на панели штатной led-play -g (зациклено)."""
+        if not body or body[:4] != b"GIF8":
+            raise AdbError("это не GIF")
+        if len(body) > 4 * 1024 * 1024:
+            raise AdbError("слишком большой GIF (>4 МБ)")
+        with _LED_LOCK:
+            with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as f:
+                f.write(body)
+                local = f.name
+            try:
+                self.adb.push(local, LED_GIF)
+            finally:
+                os.remove(local)
+            self.adb.shell(LED_STOP_SH)
+            self.adb.shell(f"rm -f {LED_SD}; start-stop-daemon -S -b -m -p {LED_SD} "
+                           f"-x {LP} -- -g {shlex.quote(LED_GIF)} -r -d {LED_DEV}")
+        return {"ok": True, "running": True}
+
+    def _led_push(self, text):
+        """Положить .led-текст на колонку в LED_FRAME (мелкое — через printf, крупное — push файла)."""
+        if len(text) < 3000:
+            self.adb.shell(f"printf '%s' {shlex.quote(text)} > {LED_FRAME}")
+        else:
+            with tempfile.NamedTemporaryFile("w", suffix=".led", delete=False) as f:
+                f.write(text)
+                local = f.name
+            try:
+                self.adb.push(local, LED_FRAME)
+            finally:
+                os.remove(local)
+
+    def _led_launch(self, ledfile):
+        """Снять прежнюю отрисовку и зациклить led-play по ledfile в фоне."""
+        self.adb.shell(LED_STOP_SH)
+        self.adb.shell(f"rm -f {LED_SD}; start-stop-daemon -S -b -m -p {LED_SD} "
+                       f"-x {LP} -- -l {shlex.quote(ledfile)} -r -d {LED_DEV}")
+
+    def led_patterns(self):
+        # через find, а не ls: adb shell идёт по pty и ls красит вывод ANSI + колонками
+        out, _, _ = self.adb.shell(f"find {QUASAR}/ledpatterns/panel -maxdepth 1 -type f -name '*.led' 2>/dev/null",
+                                   check=False)
+        return {"patterns": sorted(posixpath.basename(l.strip()) for l in out.split("\n") if l.strip().endswith(".led"))}
+
+    def clock(self, data):
+        if "v" in data:
+            v = [max(0, min(255, int(x))) for x in data["v"]]
+            if len(v) != len(CLOCK_LEDS):
+                raise AdbError(f"нужно {len(CLOCK_LEDS)} значений")
+            self.stop_pattern("clock")
+            self.display_stop()
+            self.adb.shell(self._once_snapshot() + "; ".join(f"echo {val} > {LEDS}/{LED_PREFIX}:white:clock{n}/brightness"
+                                                             for n, val in zip(CLOCK_LEDS, v)))
+            return {"ok": True}
+        text = str(data.get("text", "")).upper()
+        bright = max(0, min(255, int(data.get("brightness", 160))))
+        # Точку прикрепляем к предыдущему символу.
+        cells = []
+        for ch in text:
+            if ch == "." and cells:
+                cells[-1] = (cells[-1][0], True)
+            else:
+                cells.append((ch, False))
+        cells = (cells + [(" ", False)] * 4)[:4]
+        cmds = []
+        for pos, (ch, dot) in enumerate(cells):
+            on = set(SEGMENTS.get(ch, "")) | ({"H"} if dot else set())
+            for seg in "ABCDEFGH":
+                cmds.append(f"echo {bright if seg in on else 0} > {LEDS}/{LED_PREFIX}:white:clock{seg}{pos}/brightness")
+        for extra in ("DEGREE", "DH", "DL", "DM"):
+            v = bright if data.get(extra.lower()) else 0
+            cmds.append(f"echo {v} > {LEDS}/{LED_PREFIX}:white:clock{extra}/brightness")
+        self.adb.shell(self._once_snapshot() + "; ".join(cmds))
+        return {"ok": True}
+
+    def clock_state(self):
+        # Что сейчас горит на дисплее и кольце — для 3D-модели в «Обзоре».
+        ring = [f"plum:{c}:ring{i}/brightness" for i in (1, 2, 3) for c in ("red", "green", "blue")]
+        out, _, _ = self.adb.shell("cd /sys/class/leds && cat " + " ".join(
+            [f"{LED_PREFIX}:white:clock{n}/brightness" for n in CLOCK_LEDS] + ring))
+        v = [int(x) for x in out.split()]
+        if len(v) != len(CLOCK_LEDS) + len(ring):
+            raise AdbError("не удалось прочитать светодиоды")
+        r = v[len(CLOCK_LEDS):]
+        return {"v": v[:len(CLOCK_LEDS)], "ring": [r[0:3], r[3:6], r[6:9]]}
+
+    def ring_frames(self, name):
+        """Кадры анимации кольца (.led): «loop» в первой строке, далее «RRGGBB RRGGBB RRGGBB мс»."""
+        if name not in self.patterns()["ring"]:
+            raise AdbError("нет такого паттерна")
+        text = self.adb.read_bytes(f"{PATTERNS['ring']}/{name}").decode("utf-8", "replace")
+        frames, loop = [], False
+        for line in text.splitlines():
+            parts = line.split()
+            if parts == ["loop"]:
+                loop = True
+            elif len(parts) == 4:
+                try:
+                    frames.append({"c": [[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in parts[:3]],
+                                   "ms": int(parts[3])})
+                except ValueError:
+                    continue
+        return {"loop": loop, "frames": frames}
+
+    # ---------- запуск: заставка часов и звук ----------
+    def boot_status(self):
+        q = shlex.quote
+        out, _, _ = self.adb.shell(
+            f"[ -f {BOOT_TARGET} ] && echo target; [ -f {BOOT_CUSTOM} ] && echo custom; [ -f {BOOT_ORIG} ] && echo orig; "
+            f"grep -q ' {BOOT_TARGET} ' /proc/mounts && echo mounted; "
+            f"[ -f {SOUND_TARGET} ] && echo s_target; [ -f {SOUND_CUSTOM} ] && echo s_custom; "
+            f"grep -q ' {SOUND_TARGET} ' /proc/mounts && echo s_mounted; "
+            f"{hook_active()} && echo hook; "
+            f"[ -f {NO_BOOT_SOUND} ] && echo nosound; [ -f {BOOT_ALWAYS} ] && echo always; true")
+        flags = set(out.split())
+        res = {"supported": "target" in flags, "custom": "custom" in flags, "mounted": "mounted" in flags,
+               "sound_supported": "s_target" in flags, "sound_custom": "s_custom" in flags,
+               "sound_mounted": "s_mounted" in flags,
+               "hook": "hook" in flags, "no_boot_sound": "nosound" in flags, "always": "always" in flags}
+        if res["supported"]:
+            # Пока поверх стандартного файла смонтирован свой, стандартный берём из сохранённой копии.
+            if not res["mounted"]:
+                res["default"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_TARGET))
+            elif "orig" in flags:
+                res["default"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_ORIG))
+            else:
+                res["default"] = []
+            if res["custom"]:
+                res["frames"] = decode_clock_pattern(".binscled.zst", self.adb.read_bytes(BOOT_CUSTOM))
+        return res
+
+    def _ensure_hook(self):
+        """Кладёт свежий хук и подключает его к rootkeeper.sh.
+
+        rootkeeper.sh запускается из onboot.sh раньше, чем Quasar читает анимации и звуки, — это
+        единственная точка запуска при загрузке, которая живёт в /data. Перед правкой сохраняем копию.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            write_unix(Path(td) / "hook", BOOT_HOOK_SCRIPT)
+            self.adb.shell(f"mkdir -p {WEB_DIR}")
+            self.adb.push(Path(td) / "hook", BOOT_HOOK)
+        _, err, rc = self.adb.shell(
+            f"chmod 755 {BOOT_HOOK}; [ -f {ROOTKEEPER} ] || exit 3; "
+            f"[ -f {ROOTKEEPER}.webpanel.bak ] || cp {ROOTKEEPER} {ROOTKEEPER}.webpanel.bak; "
+            f"grep -q '{HOOK_MARK}' {ROOTKEEPER} || "
+            f"sed -i '1a [ -x {BOOT_HOOK} ] && {BOOT_HOOK} {HOOK_MARK}' {ROOTKEEPER}", check=False)
+        if rc == 3:
+            raise AdbError(f"нет {ROOTKEEPER}: подключить к загрузке не к чему")
+        if rc != 0:
+            raise AdbError(err.strip() or "не удалось подключить хук к загрузке")
+
+    def _drop_hook_if_unused(self):
+        # Хук нужен, пока есть хоть что-то своё; иначе возвращаем rootkeeper.sh к исходному виду.
+        self.adb.shell(
+            f"if [ ! -f {BOOT_CUSTOM} ] && [ ! -f {SOUND_CUSTOM} ] && [ ! -f {BOOT_ALWAYS} ] && [ ! -f {YAM_AUTOSTART} ] "
+            f"&& [ ! -f {ALARM_CONF} ] && [ ! -f {HOSTS_CUSTOM} ]; then "
+            f"[ -f {ROOTKEEPER} ] && sed -i '/{HOOK_MARK}/d' {ROOTKEEPER}; rm -f {BOOT_HOOK}; fi; true")
+
+    def hook_status(self):
+        out,_,_=self.adb.shell(hook_active()+' && echo active; true',check=False)
+        active='active' in out.split()
+        return {'hook':active,'fresh':active,'possible':active,'broken':False,'users':[],
+                'file':'/etc/init.d/S99zpanelalarm','note':'Проверка без записи; автоматическая правка системного init отключена'}
+
+    def _install_override(self, data, custom, target, orig):
+        """Кладёт свой файл и сразу монтирует его поверх стандартного; при первой установке сохраняет оригинал."""
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "f").write_bytes(data)
+            self.adb.shell(f"mkdir -p {WEB_DIR}; grep -q ' {target} ' /proc/mounts || "
+                           f"[ -f {orig} ] || cp {target} {orig}")
+            self.adb.push(Path(td) / "f", custom)
+        self._ensure_hook()
+        _, err, rc = self.adb.shell(f"grep -q ' {target} ' /proc/mounts || mount --bind {custom} {target}", check=False)
+        if rc != 0:
+            raise AdbError(err.strip() or "не удалось подменить файл")
+
+    def _remove_override(self, custom, target):
+        self.adb.shell(f"grep -q ' {target} ' /proc/mounts && umount {target}; rm -f {custom}; true")
+        self._drop_hook_if_unused()
+
+    def boot_install(self, frames):
+        if not self.boot_status()["supported"]:
+            raise AdbError(f"на этой прошивке нет {BOOT_TARGET}")
+        self._install_override(zstd_compress(encode_clock_pattern(frames)), BOOT_CUSTOM, BOOT_TARGET, BOOT_ORIG)
+        return self.boot_status()
+
+    def boot_reset(self):
+        self._remove_override(BOOT_CUSTOM, BOOT_TARGET)
+        return self.boot_status()
+
+    def boot_sound_install(self, filename, body):
+        if not self.ffmpeg:
+            raise AdbError("для смены звука нужен ffmpeg на компьютере")
+        if not self.boot_status()["sound_supported"]:
+            raise AdbError(f"на этой прошивке нет {SOUND_TARGET}")
+        # Тот же формат, что у оригинала: MP3 44,1 кГц стерео.
+        p = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn",
+                            "-ac", "2", "-ar", "44100", "-c:a", "libmp3lame", "-b:a", "192k",
+                            "-map_metadata", "-1", "-id3v2_version", "0", "-write_xing", "0", "-f", "mp3", "pipe:1"],
+                           input=body, capture_output=True, timeout=300, **_SUBPROCESS_WINDOW_OPTIONS)
+        if p.returncode != 0 or not p.stdout:
+            raise AdbError("ffmpeg: " + p.stderr.decode("utf-8", "replace").strip()[-400:])
+        self._install_override(p.stdout, SOUND_CUSTOM, SOUND_TARGET, SOUND_ORIG)
+        return self.boot_status()
+
+    def boot_sound_reset(self):
+        self._remove_override(SOUND_CUSTOM, SOUND_TARGET)
+        return self.boot_status()
+
+    def boot_sound_play(self, which):
+        st = self.boot_status()
+        if which == "custom":
+            if not st["sound_custom"]:
+                raise AdbError("свой звук не установлен")
+            path = SOUND_CUSTOM
+        else:
+            path = SOUND_ORIG if st["sound_mounted"] else SOUND_TARGET
+        return self._play_path(path)
+
+    def boot_always(self, enabled):
+        if enabled:
+            self._ensure_hook()
+            self.adb.shell(f"touch {BOOT_ALWAYS}")
+        else:
+            self.adb.shell(f"rm -f {BOOT_ALWAYS}")
+            self._drop_hook_if_unused()
+        return self.boot_status()
+
+    # ---------- YAM: менеджер пакетов ----------
+    _yam_port = None
+    _registry = (0, None)
+
+    # ---------- что панель оставила на колонке ----------
+    # ---------- блокировка аналитики ----------
+    def privacy_status(self):
+        out, _, _ = self.adb.shell(
+            f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && echo mounted; [ -f {HOSTS_CUSTOM} ] && echo custom; "
+            f"echo queued=$(cat {METRICA_BATCH} 2>/dev/null | wc -c); md5sum {BOOT_HOOK} 2>/dev/null; "
+            # проверка на деле: куда сейчас ведёт адрес аналитики
+            f"ping -c 1 -W 1 {ANALYTICS_HOSTS[0]} 2>&1 | head -n 1; true", check=False, timeout=15)
+        out = strip_ansi(out)
+        enabled = "mounted" in out and "custom" in out
+        # хук от прошлой версии панели не умеет чистить очередь — обновляем
+        if enabled and hashlib.md5(BOOT_HOOK_SCRIPT.encode()).hexdigest() not in out:
+            self._ensure_hook()
+        m = re.search(r"queued=(\d+)", out)
+        return {"enabled": enabled, "hosts": list(ANALYTICS_HOSTS), "queued": int(m.group(1)) if m else 0,
+                "blocked": f"({ANALYTICS_HOSTS[0]}" not in out and "127.0.0.1" in out}
+
+    def privacy_set(self, enabled):
+        if not enabled:
+            self.adb.shell(f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && {{ umount {HOSTS_TARGET} || umount -l {HOSTS_TARGET}; }}; "
+                           f"rm -f {HOSTS_CUSTOM}; true")
+            self._drop_hook_if_unused()
+            return self.privacy_status()
+        # основа — настоящий системный /etc/hosts (если наш уже подключён, сначала снимаем его)
+        self.adb.shell(f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && umount {HOSTS_TARGET}; true")
+        base = strip_ansi(self.adb.read_bytes(HOSTS_TARGET).decode("utf-8", "replace")).replace("\r\n", "\n")
+        lines = [ln for ln in base.splitlines() if ln.strip()]
+        text = "\n".join(lines + ["", HOSTS_MARK] + [f"127.0.0.1\t{h}" for h in ANALYTICS_HOSTS]) + "\n"
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "hosts"
+            write_unix(f, text)
+            self.adb.shell(f"mkdir -p {WEB_DIR}")
+            self.adb.push(f, HOSTS_CUSTOM)
+        self._ensure_hook()
+        _, err, rc = self.adb.shell(f"chmod 644 {HOSTS_CUSTOM}; mount --bind {HOSTS_CUSTOM} {HOSTS_TARGET}", check=False)
+        if rc:
+            raise AdbError("не удалось подключить свой /etc/hosts: " + strip_ansi(err).strip()[-200:])
+        self.privacy_purge()
+        return self.privacy_status()
+
+    def privacy_purge(self):
+        """Удалить накопленную неотправленную аналитику (только при включённой блокировке — иначе незачем)."""
+        self.adb.shell(f"[ -f {HOSTS_CUSTOM} ] && {{ {ANALYTICS_PURGE}; }}; true", check=False)
+        time.sleep(2)   # launcher перезапускает телеметрию
+        return self.privacy_status()
 
     def footprint(self):
         """Всё постоянное, что панель ставит на колонку. Временное (/tmp) исчезает само после перезагрузки."""
@@ -2842,70 +2461,46 @@ echo @@BLUEZ
             f"grep -q ' {BOOT_TARGET} ' /proc/mounts && echo 1 || echo 0", q(BOOT_CUSTOM),
             f"grep -q ' {SOUND_TARGET} ' /proc/mounts && echo 1 || echo 0", q(SOUND_CUSTOM),
             q(BOOT_ALWAYS), q(YAM_AUTOSTART), q(ALARMD),
-            f"echo $(cat {ALARM_CONF} 2>/dev/null | grep -c .)/$(grep -c '^S|' {SCENES_CONF} 2>/dev/null)",
+            f"cat {ALARM_CONF} 2>/dev/null | grep -c .",
             q(BOOT_ORIG), q(SOUND_ORIG), q(f"{ROOTKEEPER}.webpanel.bak"),
-            f"{hook_active()} && echo 1 || echo 0",
+            f"grep -q '{HOOK_MARK}' {ROOTKEEPER} 2>/dev/null && echo 1 || echo 0",
             f"[ -d {WEB_DIR} ] && du -sk {WEB_DIR} | cut -f1 || echo 0",
             f"[ -d {ALARM_DIR} ] && du -sk {ALARM_DIR} | cut -f1 || echo 0",
             q(YAMD),
-            f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && echo 1 || echo 0", q(HOSTS_CUSTOM),
-            q(ASSISTD), f"[ -d {ASSIST_DIR} ] && du -sk {ASSIST_DIR} | cut -f1 || echo 0",
-            f"find {OVR_DIR}/sounds -type f 2>/dev/null | wc -l",
-            f"[ -d {OVR_DIR}/sounds ] && du -sk {OVR_DIR}/sounds | cut -f1 || echo 0",
-            f"find {OVR_DIR}/ledpatterns -type f 2>/dev/null | wc -l",
-            f"find {MY_ANIM_DIR} -type f 2>/dev/null | wc -l",
-            f"find {YAM2_SVC_DIR}/boot -type f 2>/dev/null | wc -l", q(YAM2), q(BTOUT_MAC)])
+            f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && echo 1 || echo 0", q(HOSTS_CUSTOM)])
         v = self.adb.shell(cmd, check=False)[0].split()
-        v = (v + ["0"] * 26)[:26]
+        v = (v + ["0"] * 17)[:17]
         b = [x == "1" for x in v]
         n = lambda x: int(x) if x.isdigit() else 0
         items = [
             {"key": "boot", "name": "Своя заставка часов", "on": b[0] or b[1]},
             {"key": "sound", "name": "Свой звук запуска", "on": b[2] or b[3]},
-            {"key": "sounds", "name": "Свои системные звуки", "on": n(v[19]) > 0, "detail": f"заменено: {n(v[19])}",
-             "size_kb": n(v[20])},
-            {"key": "anims", "name": "Свои анимации кольца и часов", "on": n(v[21]) + n(v[22]) > 0,
-             "detail": f"заменено встроенных: {n(v[21])}, своих: {n(v[22])}"},
             {"key": "always", "name": "Заставка при каждой загрузке", "on": b[4]},
             {"key": "yamd", "name": "Автозапуск yamd", "on": b[5]},
-            {"key": "yam2", "name": "Автозапуск служб yam 2", "on": n(v[23]) > 0, "detail": f"служб: {n(v[23])}"},
-            {"key": "btout", "name": "Звук через Bluetooth-колонку", "on": b[25], "detail": "сторож и своя /etc/asound.conf, пока колонка подключена"},
             {"key": "privacy", "name": "Блокировка аналитики", "on": b[15] or b[16], "detail": "свой /etc/hosts"},
-            {"key": "assistant", "name": "Голосовой помощник", "on": b[17], "size_kb": n(v[18])},
-            {"key": "alarm", "name": "Будильник и сценарии", "on": b[6],
-             "detail": f"будильников: {n(v[7].split('/')[0])}, сценариев: {n((v[7].split('/') + ['0'])[1])}", "size_kb": n(v[13])},
+            {"key": "alarm", "name": "Будильник", "on": b[6], "detail": f"будильников: {n(v[7])}", "size_kb": n(v[13])},
             {"key": "backup", "name": "Копии оригиналов", "on": b[8] or b[9] or b[10],
              "detail": "заставка, звук запуска, rootkeeper.sh — на случай отката"},
-            {"key": "hook", "name": "Автозапуск: строка в rootkeeper.sh или скрипт в /etc/init.d", "on": b[11]},
+            {"key": "hook", "name": "Строка автозапуска в rootkeeper.sh", "on": b[11]},
         ]
         return {"items": items, "dir": WEB_DIR, "size_kb": n(v[12]), "any": any(i["on"] for i in items),
-                "yam_installed": b[14] or b[24]}
+                "yam_installed": b[14]}
 
     def footprint_reset(self):
         """Возвращает колонку к исходному: снимает подмены, гасит наши демоны, убирает строку из rootkeeper.sh
         и удаляет /data/quasar/webpanel. yam не трогаем — это отдельный проект со своим удалением."""
         self.adb.shell(
             f"grep -q ringing {ALARM_STATE} 2>/dev/null && echo stop > {ALARM_CMD} && sleep 3; "
-            f"start-stop-daemon -K -p {ALARM_SD} 2>/dev/null; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; "
-            f"start-stop-daemon -K -p {BTOUT_SD} 2>/dev/null; p=$(cat {BTOUT_FWD_SD} 2>/dev/null) && {{ {YAM2_KILL}; }}; "
-            f"{LED_STOP_SH}; "   # LED-панель Станции 2: фоновый led-play
-            f"grep -q ' /etc/asound.conf ' /proc/mounts && grep -q '{BTOUT_MARK}' /etc/asound.conf && "
-            f"{{ umount /etc/asound.conf || umount -l /etc/asound.conf; ( {QUASAR}/q restart >/dev/null 2>&1 & ); }}; "
-            # службы yam 2 запускала панель — гасим их группы процессов (сами пакеты остаются в yam)
-            f"for f in {YAM2_SVC_PID}*.pid; do [ -f \"$f\" ] && p=$(cat \"$f\") && kill -0 \"$p\" 2>/dev/null && {{ {YAM2_KILL}; }}; "
-            f"rm -f \"$f\"; done 2>/dev/null; "
-            f"killall aplay 2>/dev/null; "
+            f"start-stop-daemon -K -p {ALARM_SD} 2>/dev/null; killall aplay 2>/dev/null; "
             f"grep -q ' {BOOT_TARGET} ' /proc/mounts && {{ umount {BOOT_TARGET} || umount -l {BOOT_TARGET}; }}; "
             f"grep -q ' {SOUND_TARGET} ' /proc/mounts && {{ umount {SOUND_TARGET} || umount -l {SOUND_TARGET}; }}; "
             f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && {{ umount {HOSTS_TARGET} || umount -l {HOSTS_TARGET}; }}; "
-            f"[ -d {OVR_DIR} ] && (cd {OVR_DIR} && find . -type f) | while read -r f; do t=\"{QUASAR}/${{f#./}}\"; "
-            f"grep -q \" $t \" /proc/mounts && {{ umount \"$t\" || umount -l \"$t\"; }}; done; "
-            f"{hook_drop()}; true", check=False)
+            f"[ -f {ROOTKEEPER} ] && sed -i '/{HOOK_MARK}/d' {ROOTKEEPER}; true", check=False)
         # Копию rootkeeper.sh удаляем, только если без нашей строки файл совпал с ней: значит, других правок не было.
         out, _, _ = self.adb.shell(
             f"b={ROOTKEEPER}.webpanel.bak; if [ -f $b ]; then "
             f"if [ \"$(md5sum < {ROOTKEEPER})\" = \"$(md5sum < $b)\" ]; then rm -f $b; echo same; else echo differs; fi; fi; "
-            f"rm -rf {WEB_DIR}; rm -f /tmp/webpanel_alarm* {ALARM_SD} /tmp/webpanel_assistant*; true", check=False)
+            f"rm -rf {WEB_DIR}; rm -f /tmp/webpanel_alarm* {ALARM_SD}; true", check=False)
         self.ring_reset()
         res = self.footprint()
         if "differs" in out:
@@ -2918,9 +2513,7 @@ echo @@BLUEZ
     # были бы чужими; при восстановлении они снимаются заново с этой колонки. Хук и скрипт будильника — тоже
     # не берём: ставим текущую версию из панели.
     BACKUP_FILES = re.compile(r"(boot\.binscled\.zst|boot_sound\.wav|boot_every_time|yamd_autostart|hosts|"
-                              r"alarm/alarms\.conf|alarm/scenes\.conf|alarm/default\.wav|alarm/[su]_[0-9a-f]{10}\.wav|"
-                              r"override/sounds/(?:[\w-][\w.-]*/)*[\w-][\w.-]*|override/ledpatterns/(?:clock|oknix)/[\w-][\w.-]*|"
-                              r"anims/(?:ring/[\w-]{1,40}\.led|clock/[\w-]{1,40}\.binscled))")
+                              r"alarm/alarms\.conf|alarm/default\.wav|alarm/[su]_[0-9a-f]{10}\.wav)")
     BACKUP_LIMIT = 200 * 1024 * 1024
 
     def backup(self, ui):
@@ -2980,34 +2573,6 @@ echo @@BLUEZ
                 report.append("звук запуска")
             else:
                 report.append("звук запуска пропущен: на этой прошивке его не подменить")
-        sounds = {n[len("override/sounds/"):]: data for n, data in files.items() if n.startswith("override/sounds/")}
-        if sounds:
-            have, skipped = set(self.sounds()), 0
-            for name, data in sounds.items():
-                if name in have:   # на другой прошивке такого звука может не быть
-                    self._install_override(data, f"{OVR_DIR}/sounds/{name}", f"{SOUNDS_DIR}/{name}")
-                else:
-                    skipped += 1
-            report.append(f"свои системные звуки ({len(sounds) - skipped})" + (f", пропущено {skipped}: на этой прошивке их нет" if skipped else ""))
-        mine = {n: data for n, data in files.items() if n.startswith("anims/")}
-        if mine:
-            with tempfile.TemporaryDirectory() as td:
-                self.adb.shell(f"mkdir -p {MY_ANIM_DIR}/ring {MY_ANIM_DIR}/clock")
-                for n, data in mine.items():
-                    f = Path(td) / "a"
-                    f.write_bytes(data)
-                    self.adb.push(f, f"{WEB_DIR}/{n}")
-            report.append(f"свои анимации ({len(mine)})")
-        anims = {n[len("override/ledpatterns/"):]: data for n, data in files.items() if n.startswith("override/ledpatterns/")}
-        if anims:
-            have, done = self.patterns(), 0   # my/… сюда не попадут: в override только встроенные
-            for rel, data in anims.items():
-                folder, name = rel.split("/")
-                kind = next(k for k, d in PATTERNS.items() if posixpath.basename(d) == folder)
-                if name in have[kind]:
-                    self._install_override(data, f"{OVR_DIR}/ledpatterns/{rel}", f"{PATTERNS[kind]}/{name}")
-                    done += 1
-            report.append(f"свои анимации ({done})" + (f", пропущено {len(anims) - done}: на этой прошивке их нет" if done < len(anims) else ""))
         if "boot_every_time" in files:
             self.boot_always(True)
             report.append("заставка при каждой загрузке")
@@ -3046,8 +2611,9 @@ echo @@BLUEZ
             f"[ -f {ALARM_DIR}/localtime ] && export TZ=:{ALARM_DIR}/localtime; date '+%s %H:%M %Z'; echo '<<<'; "
             f"cat {ALARM_DIR}/tzname 2>/dev/null; echo '<<<'; cat {ALARM_DIR}/snooze 2>/dev/null; echo '<<<'; "
             f"p=$(cat {ALARM_SD} 2>/dev/null) && kill -0 $p 2>/dev/null && echo run; echo '<<<'; "
-            f"[ -f {ALARMD} ] && md5sum {ALARMD} && du -sk {ALARM_DIR}; true", check=False)[0].split("<<<")
-        parts = [x.strip("\r\n") for x in parts] + [""] * 8
+            f"[ -f {ALARMD} ] && md5sum {ALARMD} && du -sk {ALARM_DIR}; echo '<<<'; "
+            f"sha256sum {ALARM_CONF} 2>/dev/null; true", check=False)[0].split("<<<")
+        parts = [x.strip("\r\n") for x in parts] + [""] * 9
         inst = parts[7].split()
         items = []
         for line in parts[0].splitlines():
@@ -3058,13 +2624,16 @@ echo @@BLUEZ
             a["on"] = a["on"] == "1"
             for k in ("volume", "ramp", "duration", "snooze"):
                 a[k] = int(a[k]) if a[k].isdigit() else 0
+            a['ramp']=0
             items.append(a)
         st = parts[1].strip().split("|")
         state = {"ringing": st[0] == "ringing", "id": st[1] if len(st) > 1 else None,
                  "since": int(st[2]) if len(st) > 2 and st[2].isdigit() else None, "via": st[3] if len(st) > 3 else None}
         t = parts[3].strip().split(" ", 2)
         sn = parts[5].strip().split("|")
-        return {"alarms": items, "state": state, "log": [l for l in parts[2].splitlines() if l.strip()],
+        revision=parts[8].split()[:1]
+        return {"alarms": items, "state": state, "revision":revision[0] if revision else None,
+                "log": [l for l in parts[2].splitlines() if l.strip()],
                 "device_time": {"epoch": int(t[0]) if t and t[0].isdigit() else None,
                                 "hm": t[1] if len(t) > 1 else "", "zone": t[2] if len(t) > 2 else ""},
                 "tz": parts[4].strip() or None, "pc_tz": self._pc_tz()[0],
@@ -3085,7 +2654,24 @@ echo @@BLUEZ
         except OSError:
             return None, None
 
+    def _alarm_default_path(self):
+        """Upstream 0.1.8: firmware may ship timer.opus instead of timer.wav."""
+        names=self.sounds()
+        if ALARM_DEFAULT_SOUND in names:
+            return ALARM_DEFAULT_SOUND
+        audio=sorted(n for n in names if n.endswith(('.wav','.mp3','.opus','.ogg')))
+        for key in ('timer','alarm','ring','notification','common/'):
+            hit=next((n for n in audio if key in n),None)
+            if hit:return hit
+        if not audio:
+            raise AdbError('На колонке нет системных звуков для будильника — загрузи свой')
+        return audio[0]
+
     def _alarm_wav(self, data, dev_name):
+        with self.alarm_media_lock:
+            return self._alarm_wav_unlocked(data,dev_name)
+
+    def _alarm_wav_unlocked(self, data, dev_name):
         if not self.ffmpeg:
             raise AdbError("для звуков будильника нужен ffmpeg на компьютере")
         with tempfile.TemporaryDirectory() as td:
@@ -3093,10 +2679,12 @@ echo @@BLUEZ
             # не длиннее 5 минут: звук всё равно играет по кругу, а место в /data не бесконечное
             r = subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", "pipe:0", "-vn", "-t", "300",
                                 "-ac", "2", "-ar", "48000", "-sample_fmt", "s16", "-y", str(dst)],
-                               input=data, capture_output=True, timeout=300)
+                               input=data, capture_output=True, timeout=300, **_SUBPROCESS_WINDOW_OPTIONS)
             if r.returncode != 0:
                 raise AdbError("ffmpeg: " + r.stderr.decode("utf-8", "replace").strip()[-300:])
             self.adb.shell(f"mkdir -p {ALARM_DIR}")
+            from alarm_music import ensure_space
+            ensure_space(self,dst.stat().st_size)
             self.adb.push(dst, f"{ALARM_DIR}/{dev_name}")
 
     def alarm_sound_upload(self, filename, body):
@@ -3107,6 +2695,9 @@ echo @@BLUEZ
         return {"sound": name, "sound_name": Path(filename).stem[:60] or "свой звук"}
 
     def alarms_save(self, data):
+        revision=data.get('revision')
+        if revision is not None and not re.fullmatch(r'[a-f0-9]{64}',str(revision)):
+            raise AdbError('Некорректная версия списка будильников')
         items = data.get("alarms")
         if not isinstance(items, list) or len(items) > 30:
             raise AdbError("неверный список будильников")
@@ -3122,10 +2713,22 @@ echo @@BLUEZ
             query = clean(a.get("query"), 200)
             if mode in ("music", "text") and not query:
                 raise AdbError("укажите, что попросить у Алисы")
-            dev = self._alarm_sound(a.get("sound"), sys_needed)
+            # Звук: системный (sys:путь) перекодируем в WAV на колонке один раз; свой — уже загружен (u_*.wav).
+            snd = str(a.get("sound") or "")
+            if snd.startswith("sys:"):
+                path = snd[4:]
+                if path == ALARM_DEFAULT_SOUND:
+                    dev = "default.wav"
+                else:
+                    dev = "s_" + hashlib.sha1(path.encode()).hexdigest()[:10] + ".wav"
+                    sys_needed[dev] = path
+            elif re.fullmatch(r"u_[0-9a-f]{10}\.wav", snd):
+                dev = snd
+            else:
+                dev = "default.wav"
             used.add(dev)
             vol = max(1, min(10, int(a.get("volume") or 5)))
-            ramp = max(0, min(1800, int(a.get("ramp") or 0)))
+            ramp = 0
             dur = max(0, min(180, int(a.get("duration") or 0)))
             if mode == "sound" and not dur:
                 dur = 30          # свой звук сам не замолчит
@@ -3133,41 +2736,7 @@ echo @@BLUEZ
             lines.append("|".join([aid, "1" if a.get("on", True) else "0", tm, days, mode, query, dev,
                                    clean(a.get("sound_name"), 60), str(vol), str(ramp), str(dur), str(snz),
                                    clean(a.get("label"), 40)]))
-        self._alarm_sounds_ready(sys_needed)
-        self._alarm_write(ALARM_CONF, lines, f"rm -f {ALARM_DIR}/last_fired.t {ALARM_DIR}/snooze")
-        return self.alarms()
-
-    # ---------- общее для будильников и сценариев ----------
-    @staticmethod
-    def _alarm_sound(snd, sys_needed):
-        """Звук будильника или сценария → имя файла на колонке. Системный (sys:путь) перекодируется в WAV один раз;
-        свой уже загружен (u_*.wav)."""
-        snd = str(snd or "")
-        if snd.startswith("sys:"):
-            path = snd[4:]
-            if path == ALARM_DEFAULT_SOUND:
-                return "default.wav"
-            dev = "s_" + hashlib.sha1(path.encode()).hexdigest()[:10] + ".wav"
-            sys_needed[dev] = path
-            return dev
-        return snd if re.fullmatch(r"u_[0-9a-f]{10}\.wav", snd) else "default.wav"
-
-    def _alarm_default_path(self):
-        """Штатный звук для запасного default.wav. common/timer.wav есть не во всех прошивках (на Мини 2 его нет) —
-        тогда другой похожий из звуков колонки."""
-        names = self.sounds()
-        if ALARM_DEFAULT_SOUND in names:
-            return ALARM_DEFAULT_SOUND
-        audio = [n for n in names if n.endswith((".wav", ".mp3", ".opus", ".ogg"))]
-        for key in ("timer", "alarm", "ring", "notification", "common/"):
-            hit = next((n for n in sorted(audio) if key in n), None)
-            if hit:
-                return hit
-        if not audio:
-            raise AdbError("на колонке нет системных звуков для будильника — загрузите свой")
-        return sorted(audio)[0]
-
-    def _alarm_sounds_ready(self, sys_needed):
+        self._ensure_hook()
         # не ls: у busybox он раскрашивает имена даже в не-терминал
         have = set(self.adb.shell(f"mkdir -p {ALARM_DIR}; for f in {ALARM_DIR}/*; do echo \"${{f##*/}}\"; done",
                                   check=False)[0].split())
@@ -3179,15 +2748,15 @@ echo @@BLUEZ
                 if path not in self.sounds():
                     raise AdbError(f"нет такого звука: {path}")
                 self._alarm_wav(self.adb.read_bytes(f"{SOUNDS_DIR}/{path}"), dev)
-
-    def _alarm_write(self, conf, lines, extra=""):
-        """Пишет конфиг (будильников или сценариев), свежий скрипт демона и часовой пояс, чистит звуки, которые
-        больше никому не нужны, и перезапускает демон. alarms.conf создаётся всегда: по нему хук запускает демон."""
+        # Uploaded songs can belong to an editor draft or a recoverable alarm.
+        # Saving another schedule must not erase those independent sound files.
+        stale = [f for f in have if re.fullmatch(r"s_[0-9a-f]{10}\.wav", f) and f not in used]
         tz_name, tz_data = self._pc_tz()
         with tempfile.TemporaryDirectory() as td:
             td = Path(td)
             write_unix(td / "conf", "".join(l + "\n" for l in lines))
-            self.adb.push(td / "conf", conf + ".new")
+            incoming = ALARM_CONF + ".new." + os.urandom(6).hex()
+            self.adb.push(td / "conf", incoming)
             (td / "alarmd").write_bytes(alarm_script())
             self.adb.push(td / "alarmd", ALARMD)
             if tz_data:
@@ -3195,193 +2764,25 @@ echo @@BLUEZ
                 self.adb.push(td / "tz", f"{ALARM_DIR}/localtime")
                 write_unix(td / "tzn", tz_name or "")
                 self.adb.push(td / "tzn", f"{ALARM_DIR}/tzname")
-        self.adb.shell(f"mv {conf}.new {conf}; touch {ALARM_CONF}; chmod 644 {ALARM_DIR}/*; chmod 755 {ALARMD}; "
-                       f"cd {ALARM_DIR} && for f in [su]_*.wav; do [ -f \"$f\" ] || continue; "
-                       f"cat {ALARM_CONF} {SCENES_CONF} 2>/dev/null | grep -qF \"$f\" || rm -f \"$f\"; done; "
-                       f"for f in anim_*.sh; do [ -f \"$f\" ] || continue; n=${{f#anim_}}; n=$(echo \"${{n%.sh}}\" | tr '~' /); "
-                       f"grep -qF \"clock:$n|\" {SCENES_CONF} 2>/dev/null || rm -f \"$f\"; done"
-                       + (f"; {extra}" if extra else "") + "; true")
-        self._ensure_hook()
+        guard=data.get('_guard')
+        if callable(guard) and not guard():
+            self.adb.shell(f'rm -f {incoming}',check=False)
+            raise AdbError('Сохранение будильника отменено новым действием')
+        _,_,commit_code=self.adb.shell(f'exec 9>{ALARM_DIR}/config.lock; i=0; '
+                       'until flock -xn 9; do i=$((i+1)); [ "$i" -ge 50 ] && exit 1; sleep 0.1; done; '
+                       + (f'[ "$(sha256sum {ALARM_CONF} | cut -d " " -f 1)" = "{revision}" ] || '
+                          f'{{ rm -f {incoming}; exit 42; }}; ' if revision else '')
+                       +
+                       f"mv {incoming} {ALARM_CONF} || exit 1; chmod 644 {ALARM_DIR}/*; chmod 755 {ALARMD}; "
+                       f"rm -f {ALARM_DIR}/last_fired.t; "
+                       f'if [ -f {ALARM_DIR}/snooze ]; then IFS="|" read -r sat sid < {ALARM_DIR}/snooze; '
+                       f'awk -F "|" -v id="$sid" \'$1==id {{found=1}} END {{exit !found}}\' {ALARM_CONF} || '
+                       f'rm -f {ALARM_DIR}/snooze; fi'
+                       + "".join(f"; rm -f {ALARM_DIR}/{f}" for f in stale),check=False)
+        if commit_code==42:raise AdbError('Список будильников изменился. Обнови его и повтори сохранение.')
+        if commit_code:raise AdbError('Не удалось сохранить список будильников на колонке')
         self._alarm_daemon(restart=True)
-
-    # ---------- сценарии ----------
-    # Сценарий — граф нод (scenes.conf, разбирает device/alarmd.sh). У if и repeat два выхода: next и else.
-    SCENE_KINDS = ("query", "say", "ask", "assistant", "vol", "sound", "ring", "wait", "wait_until", "wait_quiet", "stop",
-                   "scene", "anim", "if", "repeat", "note")
-    SCENE_CHECKS = ("time", "days", "playing", "online", "vol_above", "chance", "assistant_mode")
-
-    def scenes(self):
-        out, _, _ = self.adb.shell(
-            f"cat {SCENES_CONF} 2>/dev/null; echo '<<<'; for f in {SCENE_RUN}*; do case $f in *.nodes|*.c*|*\\*) continue;; esac; "
-            f"kill -0 $(cat $f) 2>/dev/null && echo \"${{f#{SCENE_RUN}}}\"; done; echo '<<<'; tail -n 40 {SCENES_LOG} 2>/dev/null; "
-            f"echo '<<<'; p=$(cat {ALARM_SD} 2>/dev/null) && kill -0 $p 2>/dev/null && echo run; true", check=False)
-        conf, running, log, daemon = (strip_ansi(out).split("<<<") + ["", "", "", ""])[:4]
-        items, by_id = [], {}
-        num = lambda v: int(v) if v.lstrip("-").isdigit() else 0
-        for line in conf.splitlines():
-            f = line.rstrip("\r").split("|")
-            if f[0] == "S" and len(f) == 8:
-                voice = f[3] == "voice"
-                s = {"id": f[1], "on": f[2] == "1", "trigger": f[3], "time": "" if voice else f[4], "days": f[5], "start": f[6],
-                     "name": f[7], "phrases": [x for x in f[4].split(",") if x] if voice else [], "nodes": []}
-                items.append(s); by_id[s["id"]] = s
-            elif f[0] == "N" and len(f) == 10 and f[1] in by_id:
-                _, sid, nid, kind, a, b, nx, el, x, y = f
-                n = {"id": nid, "kind": kind, "next": nx, "else": el, "x": num(x), "y": num(y)}
-                if kind in ("query", "say", "ask", "note"):
-                    n["text"] = a
-                elif kind == "vol":
-                    n.update(level=num(a), ramp=num(b))
-                elif kind == "sound":
-                    n["sound"] = b or "sys:" + ALARM_DEFAULT_SOUND
-                elif kind == "ring":
-                    n.update(color="#" + a, secs=num(b))
-                elif kind in ("wait", "wait_quiet"):
-                    n["secs"] = num(a)
-                elif kind == "wait_until":
-                    n["time"] = a
-                elif kind == "scene":
-                    n["target"] = a
-                elif kind == "anim":
-                    n.update(anim=a, secs=num(b))
-                elif kind == "assistant":
-                    n["mode"] = a == "on"
-                elif kind == "if":
-                    n.update(check=a, arg=b)
-                elif kind == "repeat":
-                    n["count"] = num(a)
-                by_id[sid]["nodes"].append(n)
-        return {"scenes": items, "running": running.split(), "log": [l for l in log.splitlines() if l.strip()],
-                "daemon": daemon.strip() == "run"}
-
-    def scenes_save(self, data):
-        items = data.get("scenes")
-        if not isinstance(items, list) or len(items) > 20:
-            raise AdbError("неверный список сценариев")
-        # тексты идут в конфиг через «|» и в JSON для ассистента — без разделителей, кавычек и обратной косой
-        text = lambda v, n: re.sub(r'[|"\\\x00-\x1f]', " ", str(v or "")).strip()[:n]
-        num = lambda v, lo, hi: max(lo, min(hi, int(float(v or 0))))
-        hm = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
-        ids = {re.sub(r"[^a-z0-9]", "", str(s.get("id") or ""))[:12] for s in items}
-        lines, sys_needed, clock_anims = [], {}, set()
-        patterns = None
-        for s in items:
-            sid = re.sub(r"[^a-z0-9]", "", str(s.get("id") or ""))[:12] or os.urandom(4).hex()
-            name = text(s.get("name"), 40) or "Сценарий"
-            # manual — сам не запускается: кнопкой в панели или нодой «Другой сценарий»
-            trig = s.get("trigger") if s.get("trigger") in ("boot", "voice", "manual") else "time"
-            tm = str(s.get("time") or "")
-            if trig == "time" and not hm.fullmatch(tm):
-                raise AdbError(f"«{name}»: неверное время {tm}")
-            if trig == "voice":   # фразы — на место времени; запятая разделяет их и в конфиге
-                phrases = [p for p in (text(x, 60).replace(",", " ").strip() for x in (s.get("phrases") or [])[:8]) if p]
-                if not phrases:
-                    raise AdbError(f"«{name}»: укажите фразу для ассистента")
-                tm = ",".join(phrases)
-            days = "".join(sorted(set(re.sub(r"[^1-7]", "", str(s.get("days", ""))))))
-            nodes = s.get("nodes")
-            if not isinstance(nodes, list) or len(nodes) > 60:
-                raise AdbError(f"«{name}»: нод должно быть не больше 60")
-            nids = [re.sub(r"[^0-9]", "", str(n.get("id") or ""))[:4] for n in nodes]
-            if "" in nids or len(set(nids)) != len(nids):
-                raise AdbError(f"«{name}»: у нод должны быть разные номера")
-            link = lambda v: (str(v) if str(v or "") in nids else "")
-            start = link(s.get("start"))
-            if not start and any(n.get("kind") != "note" for n in nodes):
-                raise AdbError(f"«{name}»: соедините «Запуск» с первой нодой")
-            lines.append("|".join(["S", sid, "1" if s.get("on", True) else "0", trig, tm if trig in ("time", "voice") else "",
-                                   days if trig != "manual" else "", start, name]))
-            for nid, n in zip(nids, nodes):
-                kind = n.get("kind")
-                if kind not in self.SCENE_KINDS:
-                    raise AdbError(f"«{name}»: неизвестная нода {kind}")
-                a = b = ""
-                if kind in ("query", "say", "ask"):
-                    a = text(n.get("text"), 200)
-                    if not a:
-                        raise AdbError(f"«{name}»: в ноде не задан текст")
-                elif kind == "note":
-                    a = text(n.get("text"), 200)
-                elif kind == "assistant":
-                    a = "on" if n.get("mode") else "off"
-                elif kind == "vol":
-                    a, b = num(n.get("level"), 0, 10), num(n.get("ramp"), 0, 1800)
-                elif kind == "sound":
-                    b = str(n.get("sound") or "")
-                    a = self._alarm_sound(b, sys_needed)
-                    b = b if b.startswith("sys:") or a == b else ""
-                elif kind == "ring":
-                    c = str(n.get("color") or "").lstrip("#").lower()
-                    if not re.fullmatch(r"[0-9a-f]{6}", c):
-                        raise AdbError(f"«{name}»: неверный цвет кольца")
-                    a, b = c, num(n.get("secs"), 1, 600)
-                elif kind == "wait":
-                    a = num(n.get("secs"), 1, 86400)
-                elif kind == "wait_quiet":
-                    a = num(n.get("secs"), 10, 7200)
-                elif kind == "wait_until":
-                    a = str(n.get("time") or "")
-                    if not hm.fullmatch(a):
-                        raise AdbError(f"«{name}»: неверное время ожидания")
-                elif kind == "scene":
-                    a = re.sub(r"[^a-z0-9]", "", str(n.get("target") or ""))[:12]
-                    if a not in ids or a == sid:
-                        raise AdbError(f"«{name}»: выберите, какой другой сценарий запустить")
-                elif kind == "anim":
-                    patterns = patterns or self.patterns()
-                    pkind, _, pname = str(n.get("anim") or "").partition(":")
-                    if pkind not in ("ring", "clock") or pname not in patterns.get(pkind, []) or not re.fullmatch(r"(my/)?[\w.-]+", pname):
-                        raise AdbError(f"«{name}»: выберите анимацию из списка")
-                    if pkind == "clock":
-                        clock_anims.add(pname)
-                    a, b = f"{pkind}:{pname}", num(n.get("secs"), 1, 600)
-                elif kind == "if":
-                    a = n.get("check")
-                    if a not in self.SCENE_CHECKS:
-                        raise AdbError(f"«{name}»: неизвестное условие")
-                    arg = str(n.get("arg") or "")
-                    if a == "time":
-                        f, _, to = arg.partition("-")
-                        if not (hm.fullmatch(f) and hm.fullmatch(to)):
-                            raise AdbError(f"«{name}»: время в условии — как 22:00-07:00")
-                        b = arg
-                    elif a == "days":
-                        b = "".join(sorted(set(re.sub(r"[^1-7]", "", arg)))) or "1234567"
-                    elif a == "vol_above":
-                        b = num(arg, 0, 10)
-                    elif a == "chance":
-                        b = num(arg, 0, 100)
-                elif kind == "repeat":
-                    a = num(n.get("count"), 1, 20)
-                two = kind in ("if", "repeat")
-                lines.append("|".join(["N", sid, nid, kind, str(a), str(b), "" if kind == "note" else link(n.get("next")),
-                                       link(n.get("else")) if two else "", str(num(n.get("x"), -20000, 20000)), str(num(n.get("y"), -20000, 20000))]))
-        self._alarm_sounds_ready(sys_needed)
-        # анимацию часов колонка сама не разберёт (zstd, свой формат кадров) — кладём готовый скрипт, как для «На колонке»
-        if clock_anims:
-            with tempfile.TemporaryDirectory() as td:
-                for pname in clock_anims:
-                    script = "anim_" + pname.replace("/", "~") + ".sh"   # my/… — «~» вместо «/» в имени файла
-                    f = Path(td) / "anim.sh"
-                    write_unix(f, clock_player_script(self.clock_frames(pname)))
-                    self.adb.push(f, f"{ALARM_DIR}/{script}")
-        self._alarm_write(SCENES_CONF, lines)
-        return self.scenes()
-
-    def scene_run(self, sid):
-        if sid not in {s["id"] for s in self.scenes()["scenes"]}:
-            raise AdbError("нет такого сценария")
-        if not self.scenes()["daemon"]:
-            raise AdbError("сценарии на колонке не запущены — сохраните сценарий ещё раз")
-        self.adb.shell(f"echo {shlex.quote(sid)} > {SCENE_FIRE}")
-        return {"ok": True}
-
-    def scene_stop(self, sid):
-        sid = re.sub(r"[^a-z0-9]", "", str(sid or ""))
-        self.adb.shell(f"p=$(cat {SCENE_RUN}{sid} 2>/dev/null) && kill $p 2>/dev/null; rm -f {SCENE_RUN}{sid} {SCENE_RUN}{sid}.*; "
-                       f"killall aplay 2>/dev/null; true", check=False)
-        self.ring_reset()
-        return self.scenes()
+        return self.alarms()
 
     def alarm_install(self):
         """Ставит поддержку будильника на колонку (или обновляет скрипт): всё в ALARM_DIR + строка в хуке загрузки.
@@ -3401,7 +2802,7 @@ echo @@BLUEZ
     def _alarm_daemon(self, restart=False):
         """(Пере)запуск демона. Пока будильник звенит, не трогаем — иначе он оборвётся."""
         self.adb.shell(
-            f"p=$(cat {ALARM_SD} 2>/dev/null); if kill -0 $p 2>/dev/null; then "
+            f"p=$(cat {ALARM_SD} 2>/dev/null); if kill -0 $p 2>/dev/null; then :; "
             + (f"grep -q ringing {ALARM_STATE} 2>/dev/null || {{ kill $p; rm -f {ALARM_SD}; }}; " if restart else "")
             + f"fi; [ -f {ALARM_SD} ] && kill -0 $(cat {ALARM_SD}) 2>/dev/null || "
             f"start-stop-daemon -S -b -m -p {ALARM_SD} -x /bin/sh -- {ALARMD}")
@@ -3507,14 +2908,14 @@ echo @@BLUEZ
                 "update": bool(installed) and installed["tag_name"] != latest["tag_name"]}
 
     def yam_install_daemon(self):
-        """Как install.sh из репозитория yam: последний релиз с yamd, проверка SHA256SUMS, yamd на колонку, запуск."""
+        """Как install.sh из репозитория yam: последний релиз, проверка SHA256SUMS, yamd на колонку, запуск."""
         rels = self._yam_release_list(refresh=True)
         if not rels:
-            raise AdbError("на GitHub нет релиза yam с yamd-aarch64-linux-musl")
+            raise AdbError("Нет релиза со старым yamd")
         rel = rels[0]
         assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
         if "yamd-aarch64-linux-musl" not in assets or "SHA256SUMS" not in assets:
-            raise AdbError(f"в релизе yam {rel.get('tag_name')} нет SHA256SUMS")
+            raise AdbError("в последнем релизе yam нет yamd-aarch64-linux-musl или SHA256SUMS")
         with urllib.request.urlopen(assets["SHA256SUMS"], timeout=30) as r:
             sums = r.read().decode()
         expected = next((ln.split()[0] for ln in sums.splitlines()
@@ -3626,7 +3027,7 @@ echo @@BLUEZ
                       (r"orion", "orion"), (r"pickle", "pickle"), (r"station-mini3|bergamot", "bergamot"),
                       (r"saturn", "saturn"), (r"tulip", "yandexstation"), (r"yandexstation_2|station-max", "yandexstation_2"),
                       (r"mediatek,mt8167|jbl.*link.*music", "jbl_link_music"), (r"mango", "mango"), (r"plum", "plum"),
-                      (r"yandex.*station.*micro|yandexmicro", "yandexmicro"), (r"amlogic,axg", "yandexmini"))
+                      (r"station-micro|yandex.*station.*micro|yandexmicro", "yandexmicro"), (r"amlogic,axg", "yandexmini"))
     YAM2_ARMV7 = ("mango", "jbl_link_music")
     _yam2_rels = (0, [])
     _yam2_sums = {}
@@ -3691,6 +3092,23 @@ echo @@BLUEZ
             self._yam2_sums[tag] = sums
         return self._yam2_sums[tag]
 
+    def yam2_preflight(self):
+        out, _, rc = self.adb.shell("uname -m; awk '/MemAvailable/{print $2}' /proc/meminfo; "
+                                   "df -k /data | awk 'NR==2{print $4}'; "
+                                   "for t in sha256sum start-stop-daemon mount; do command -v $t >/dev/null || echo missing:$t; done; true", check=False)
+        lines = strip_ansi(out).replace('\r', '').splitlines()
+        arch = lines[0].strip() if lines else ''
+        mem = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else 0
+        free = int(lines[2]) if len(lines) > 2 and lines[2].isdigit() else 0
+        issues = []
+        if rc or arch != 'aarch64': issues.append('требуется ядро aarch64')
+        if mem < 32768: issues.append('нужно не менее 32 МБ доступной RAM')
+        if free < 32768: issues.append('нужно не менее 32 МБ свободного /data')
+        issues.extend(x for x in lines if x.startswith('missing:'))
+        return {'compatible': not issues, 'arch': arch, 'available_kib': mem, 'free_kib': free,
+                'issues': issues, 'autostart_supported': True, 'autostart_verified': False,
+                'note': 'Проверка ресурсов предварительная. Статический musl-бинарник проверяется по SHA256 и ELF перед установкой. Совместимость исполнения ещё требует проверки.'}
+
     def yam2_status(self, refresh=False):
         plat = self.yam2_platform()
         out, _, _ = self.adb.shell(f"[ -x {YAM2} ] && [ -x {YAM2_RUN} ] && sha256sum {YAM2}; true", check=False, timeout=30)
@@ -3698,7 +3116,7 @@ echo @@BLUEZ
         legacy, _, _ = self.adb.shell(f"[ -x {YAMD} ] && echo installed; pidof yamd >/dev/null && echo running; true",
                                       check=False)
         host = self.adb.serial.split(":")[0] if self.adb.serial and ":" in self.adb.serial else None
-        res = {"installed": bool(sha), "platform": plat, "root": YAM2_ROOT, "host": host,
+        res = {"preflight": self.yam2_preflight(), "installed": bool(sha), "platform": plat, "root": YAM2_ROOT, "host": host,
                "legacy": {"installed": "installed" in legacy, "running": "running" in legacy}}
         try:
             rels = self._yam2_releases(refresh)
@@ -3723,9 +3141,26 @@ echo @@BLUEZ
     def _yam2_asset(self, plat):
         return "yam-armv7-unknown-linux-musleabihf" if plat in self.YAM2_ARMV7 else "yam-aarch64-unknown-linux-musl"
 
+    @staticmethod
+    def _yam2_validate_binary(blob):
+        # Micro has a 64-bit kernel but a 32-bit glibc userspace: require a static ELF64.
+        if (len(blob) < 64 or len(blob) > 32 * 1024 * 1024 or blob[:6] != b"\x7fELF\x02\x01"
+                or int.from_bytes(blob[18:20], "little") != 183):
+            raise AdbError("Ожидался статический ELF64 aarch64, до 32 МБ")
+        offset = int.from_bytes(blob[32:40], "little")
+        size = int.from_bytes(blob[54:56], "little")
+        count = int.from_bytes(blob[56:58], "little")
+        if not 1 <= count <= 128 or size < 56 or offset + size * count > len(blob):
+            raise AdbError("Некорректные сегменты ELF")
+        if any(int.from_bytes(blob[offset+i*size:offset+i*size+4], "little") == 3 for i in range(count)):
+            raise AdbError("Динамический ELF требует непроверенного загрузчика; установка отменена")
+
     def yam2_install(self):
         """Как install.sh yam: последний релиз yam-v…, сверка с SHA256SUMS, бинарник + профиль + обёртка в /data/yam.
         Корень системы не трогаем (на Лайт install.sh ещё делает /usr/bin/yam и S99yam), старый yamd — тоже."""
+        check = self.yam2_preflight()
+        if not check["compatible"]:
+            raise AdbError("YAM 2: " + "; ".join(check["issues"]))
         plat = self.yam2_platform()
         if not plat:
             raise AdbError("не удалось определить платформу колонки для yam")
@@ -3743,7 +3178,10 @@ echo @@BLUEZ
                 raise AdbError(f"в релизе {tag} нет контрольной суммы {asset}")
             a = next(x for x in rel["assets"] if x["name"] == asset)
             with urllib.request.urlopen(a["browser_download_url"], timeout=300) as r:
-                blob = r.read()
+                blob = r.read(32 * 1024 * 1024 + 1)
+            self._yam2_validate_binary(blob)
+            if check["free_kib"] < 16384 + 2 * ((len(blob) + 1023) // 1024):
+                raise AdbError("Недостаточно места для YAM, резервной копии и запаса 16 МБ")
             if hashlib.sha256(blob).hexdigest() != expected or (a.get("digest") and a["digest"] != "sha256:" + expected):
                 raise AdbError("контрольная сумма yam не совпала с SHA256SUMS")
             with urllib.request.urlopen(f"https://raw.githubusercontent.com/nyakokitsu/yam/{tag}/platforms/{plat}.yaml",
@@ -3751,12 +3189,18 @@ echo @@BLUEZ
                 profile = r.read()
             if len(profile) > 4096 or not re.search(rb"(?m)^id: " + re.escape(plat.encode()) + rb"\s*$", profile):
                 raise AdbError(f"профиль платформы {plat} в релизе {tag} не похож на профиль yam")
-            free, _, _ = self.adb.shell(f"mkdir -p {YAM2_ROOT}/bin {YAM2_ROOT}/platforms && "
+            self.adb.shell(f"[ ! -e {YAM2_ROOT} ] || [ -f {YAM2_ROOT}/.panel-managed ] || exit 4")
+            free, _, _ = self.adb.shell(f"mkdir -p {YAM2_ROOT}/bin {YAM2_ROOT}/platforms && touch {YAM2_ROOT}/.panel-managed && "
                                         f"df -k {YAM2_ROOT} | tail -1 | awk '{{print $4}}'", check=False)
             if free.strip().isdigit() and int(free) < len(blob) // 1024 + 4096:
                 raise AdbError(f"мало места в /data: свободно {free.strip()} КБ")
             wrapper = (f"#!/bin/sh\nexport YAM_PLATFORM='{plat}'\nexport YAM_PROFILES='{YAM2_ROOT}/platforms'\n"
                        f"export YAM_ROOT='{YAM2_ROOT}'\nexec '{YAM2}' \"$@\"\n")   # как у install.sh: его --uninstall узнаёт её
+            stamp = str(time.time_ns())
+            self.adb.shell(f"if [ -e {YAM2_ROOT} ] && [ ! -f {YAM2_ROOT}/.panel-managed ]; then exit 4; fi; "
+                           f"mkdir -p {YAM2_ROOT}/backups/{stamp} || exit 5; "
+                           f"for f in {YAM2} {YAM2_RUN} {YAM2_ROOT}/platforms/{plat}.yaml; do "
+                           f'[ ! -f "$f" ] || cp "$f" {YAM2_ROOT}/backups/{stamp}/ || exit 5; done')
             with tempfile.TemporaryDirectory() as td:
                 (Path(td) / "yam").write_bytes(blob)
                 (Path(td) / "p.yaml").write_bytes(profile)
@@ -3765,30 +3209,33 @@ echo @@BLUEZ
                 self.adb.push(Path(td) / "p.yaml", f"{YAM2_ROOT}/platforms/{plat}.yaml")
                 self.adb.push(Path(td) / "yam-run", f"{YAM2_RUN}.new")
             out, _, _ = self.adb.shell(f"sha256sum {YAM2}.new", check=False)
-            if expected not in out:
+            if out.split()[:1] != [expected]:
                 self.adb.shell(f"rm -f {YAM2}.new {YAM2_RUN}.new", check=False)
                 raise AdbError("файл на колонке не совпал со скачанным")
             self.adb.shell(f"chmod 755 {YAM2}.new {YAM2_RUN}.new && mv {YAM2}.new {YAM2} && mv {YAM2_RUN}.new {YAM2_RUN}")
-            self._yam2_check(["list"], timeout=30)       # создаёт базу и заодно проверяет, что бинарник запускается
+            try:
+                self._yam2_check(["list"], timeout=30)
+            except Exception:
+                self.adb.shell(f"for f in bin/yam bin/yam-run platforms/{plat}.yaml; do "
+                               f"b={YAM2_ROOT}/backups/{stamp}/$(basename \"$f\"); "
+                               f"if [ -f \"$b\" ]; then cp \"$b\" {YAM2_ROOT}/\"$f\"; "
+                               f"else rm -f {YAM2_ROOT}/\"$f\"; fi; done", check=False)
+                raise AdbError("YAM не запустился; восстановление прежних файлов запрошено, резервная копия сохранена") from None
             return {**self.yam2_status(), "installed_tag": tag}
         finally:
             self._yam2_lock.release()
 
     def yam2_update(self):
-        # Обновление сам yam проверяет подписью Ed25519 своего релиза
-        return {"text": self._yam2_check(["update"], timeout=300), **self.yam2_status(refresh=True)}
+        return {"text": "YAM обновлён с резервной копией", **self.yam2_install()}
 
     def yam2_uninstall(self):
-        """Удаляет /data/yam целиком — как install.sh --uninstall, но без /usr/bin/yam и S99yam: их ставит не панель."""
+        self.adb.shell(f"test -f {YAM2_ROOT}/.panel-managed && grep -Fqx \"export YAM_PROFILES='{YAM2_ROOT}/platforms'\" {YAM2_RUN} || exit 3")
         for svc in self._yam2_services_raw():
-            self._yam2_svc_stop(svc["id"])
-        out, _, rc = self.adb.shell(
-            f"grep -Fqx \"export YAM_PROFILES='{YAM2_ROOT}/platforms'\" {YAM2_RUN} || exit 3; rm -rf {YAM2_ROOT}; "
-            f"rm -rf {YAM2_SVC_DIR}", check=False, timeout=60)
-        if rc == 3:
-            raise AdbError(f"в {YAM2_ROOT} нет обёртки yam-run — не похоже на yam, удалять не стали")
-        self._drop_hook_if_unused()
-        return self.yam2_status()
+            self._yam2_svc_stop(svc['id'])
+        backup = f'{WEB_DIR}/yam2-removed/{time.time_ns()}'
+        self.adb.shell(f'mkdir -p {backup} && mv {YAM2_ROOT} {backup}/yam; '
+                       f'[ ! -d {YAM2_SVC_DIR} ] || mv {YAM2_SVC_DIR} {backup}/services')
+        return {'installed': False, 'backup': backup, 'text': 'YAM убран, данные сохранены в резервной копии на колонке'}
 
     def yam2_registry_add(self):
         name, url, key = YAM2_REGISTRY
@@ -3947,11 +3394,17 @@ echo @@BLUEZ
                        f"start-stop-daemon -S -b -m -p {pid} -x /bin/sh -- {YAM2_SVC_DIR}/{sid}.sh")
 
     def _yam2_svc_stop(self, sid):
-        # start-stop-daemon -b делает setsid: у скрипта своя группа процессов, гасим её целиком вместе с программой
+        if not re.fullmatch(r"[a-z0-9._-]+~[a-z0-9._-]+~[a-z0-9._-]+", sid or ""):
+            raise AdbError("плохой id службы")
         pid = f"{YAM2_SVC_PID}{sid}.pid"
-        self.adb.shell(f"p=$(cat {pid} 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && {{ {YAM2_KILL}; "
-                       f"for i in 1 2 3 4 5 6 7 8 9 10; do [ -n \"$g\" ] && kill -0 -- -$g 2>/dev/null || break; sleep 0.5; done; "
-                       f"[ \"${{g:-0}}\" -gt 1 ] && kill -KILL -- -$g 2>/dev/null; }}; rm -f {pid}; true", check=False)
+        launcher = f"{YAM2_SVC_DIR}/{sid}.sh"
+        q = shlex.quote
+        self.adb.shell(
+            f'p=$(cat {pid} 2>/dev/null); case "$p" in ""|*[!0-9]*) exit 0;; esac; '
+            f'kill -0 "$p" 2>/dev/null || exit 0; '
+            f'tr "\\000" " " < /proc/$p/cmdline | grep -Fq -- {q(launcher)} || exit 3; '
+            + YAM2_KILL + f'; for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 \"$p\" 2>/dev/null || break; sleep 0.2; done; '
+            f'kill -0 \"$p\" 2>/dev/null && exit 4; rm -f {pid}', check=True)
 
     def yam2_service(self, sid, action, stop_legacy=False):
         if not re.fullmatch(r"[a-z0-9._-]+~[a-z0-9._-]+~[a-z0-9._-]+", sid or ""):
@@ -3968,14 +3421,15 @@ echo @@BLUEZ
             self._yam2_svc_stop(sid)
         elif action in ("boot", "noboot"):
             if action == "boot":
-                self._yam2_svc(sid)
                 self._ensure_hook()
-                if not self.adb.shell(f"[ -f {YAM2_SVC_DIR}/{sid}.sh ] && echo y; true")[0].strip():
-                    with tempfile.TemporaryDirectory() as td:
-                        write_unix(Path(td) / "s", self._yam2_launcher(self._yam2_svc(sid)))
-                        self.adb.shell(f"mkdir -p {YAM2_SVC_DIR}/boot")
-                        self.adb.push(Path(td) / "s", f"{YAM2_SVC_DIR}/{sid}.sh")
-                self.adb.shell(f"mkdir -p {YAM2_SVC_DIR}/boot && touch {YAM2_SVC_DIR}/boot/{sid}")
+                self._yam2_svc(sid)
+                # This updates only /data/alarmd, preserving its existing init and schedule.
+                self.native_scenes.deploy()
+                with tempfile.TemporaryDirectory() as td:
+                    write_unix(Path(td) / 'service', self._yam2_launcher(self._yam2_svc(sid)))
+                    self.adb.shell(f'mkdir -p {YAM2_SVC_DIR}/boot')
+                    self.adb.push(Path(td) / 'service', f'{YAM2_SVC_DIR}/{sid}.sh')
+                self.adb.shell(f'touch {YAM2_SVC_DIR}/boot/{sid}')
             else:
                 self.adb.shell(f"rm -f {YAM2_SVC_DIR}/boot/{sid}")
                 self._drop_hook_if_unused()
@@ -4004,9 +3458,17 @@ echo @@BLUEZ
             pos = self._bt_position(p.get("title"))
             if pos:
                 g = {**g, "state": {**g["state"], "playerState": {**p, "progress": pos[0]}}, "progress_at": pos[1]}
-        if p and p.get("type") == "FmRadio":
-            self._remember_fm(p)
         return {"auth": self.auth.info(), "glagol": g}
+
+    def _bt_position(self, title):
+        """Позиция трека с телефона; спрашиваем не чаще раза в 3 с — между опросами её досчитывает страница."""
+        c, now = self._bt_pos, time.time()
+        if c and now - c[1] < 3 and c[2] == title:
+            return c
+        out, _, _ = self.adb.shell(BLUEZ_DUMP + "; true", check=False, timeout=8)
+        pos = next((i['org.bluez.MediaPlayer1']['Position'] for i in parse_bluez(strip_ansi(out)).values() if isinstance(i.get('org.bluez.MediaPlayer1',{}).get('Position'),int)),None)
+        self._bt_pos = (pos / 1000, now, title) if pos is not None else None
+        return self._bt_pos
 
     # Логотипы станций Алисы: их отдаёт только плеер, пока станция играет, — запоминаем на будущее.
     _fm_cache = None
@@ -4036,26 +3498,11 @@ echo @@BLUEZ
             except OSError:
                 pass
 
-    def _bt_position(self, title):
-        """Позиция трека с телефона; спрашиваем не чаще раза в 3 с — между опросами её досчитывает страница."""
-        c, now = self._bt_pos, time.time()
-        if c and now - c[1] < 3 and c[2] == title:
-            return c
-        out, _, _ = self.adb.shell(BLUEZ_DUMP + "; true", check=False, timeout=8)
-        pos = next((i["org.bluez.MediaPlayer1"]["Position"] for i in parse_bluez(strip_ansi(out)).values()
-                    if isinstance(i.get("org.bluez.MediaPlayer1", {}).get("Position"), int)), None)
-        self._bt_pos = (pos / 1000, now, title) if pos is not None else None
-        return self._bt_pos
 
     def music_cmd(self, d):
         cmd = d.get("command")
         if cmd not in MUSIC_COMMANDS:
             raise AdbError("неизвестная команда")
-        if cmd == "sendText":
-            text = d.get("text")
-            if not isinstance(text, str) or not 1 <= len(text.strip()) <= ALICE_COMMAND_LIMIT:
-                raise AdbError("Команда Алисе должна содержать от 1 до 1024 символов")
-            d = {**d, "text": text.strip()}
         payload = {"command": cmd, **{k: d[k] for k in MUSIC_COMMANDS[cmd] if k in d}}
         res = self.glagol.send(payload)
         if cmd == "play":
@@ -4177,7 +3624,7 @@ echo @@BLUEZ
             "pairable": bool(adapter.get("Pairable")), "alias": adapter.get("Alias") or adapter.get("Name"),
             "pair_until": pair_until if pair_until and pair_until > time.time() else None,
             "devices": devices, "out": {**self._btout_info(outinfo, devices, self._btout_saved_name), **self._btout_last(devices),
-                                        **self._btout_vol(vol)},
+                                        **self._btout_vol(vol), 'supported':getattr(self,'btout_supported',False)},
         }
 
     @staticmethod
@@ -4187,6 +3634,7 @@ echo @@BLUEZ
         return {"volume": int(m.group(2)), "volume_ctl": m.group(1)} if m else {}
 
     def btout_volume(self, level):
+        self._require_btout()
         level = max(0, min(100, int(level)))
         out, _, _ = self.adb.shell("amixer -D bluealsa scontrols 2>/dev/null; true", check=False)
         m = re.search(r"Simple mixer control '([^']*A2DP)',0", strip_ansi(out))
@@ -4232,6 +3680,10 @@ echo @@BLUEZ
                 "state": state, "watch": "watch" in words}
 
     # ---------- звук через Bluetooth-колонку ----------
+    def _require_btout(self):
+        if not getattr(self,'btout_supported',False):
+            raise AdbError('Вывод на внешнюю Bluetooth-колонку для этой модели ещё не проверен; подключение телефона к Станции доступно')
+
     @staticmethod
     def _bt_mac(mac):
         mac = str(mac or "").upper()
@@ -4240,6 +3692,7 @@ echo @@BLUEZ
         return mac
 
     def btout_scan(self, seconds=12):
+        self._require_btout()
         """Ищем устройства рядом (колонку надо заранее перевести в режим сопряжения). Колонки и наушники — первыми."""
         seconds = max(5, min(20, int(seconds)))
         self.adb.shell(f"bluetoothctl --timeout {seconds} scan on >/dev/null 2>&1; true", check=False, timeout=seconds + 15)
@@ -4258,6 +3711,7 @@ echo @@BLUEZ
 
     def btout_use(self, mac):
         """Сопрягаем (если ещё нет), доверяем, подключаем — и включаем сторож: он переводит звук на колонку."""
+        self._require_btout()
         mac = self._bt_mac(mac)
         has_loop = self.adb.shell("grep -q snd_aloop /proc/modules || find /lib/modules -name snd-aloop.ko | grep -q . && echo yes; true",
                                   check=False)[0]
@@ -4309,6 +3763,7 @@ echo @@BLUEZ
         return {**self.bt_state(), "restarted": restarted}
 
     def btout_off(self):
+        self._require_btout()
         """Встроенный динамик: убираем выбор — сторож снимет подмену, перезапустит Алису и выйдет."""
         # сторожа гасим сами и сразу возвращаем встроенный динамик (с продолжением музыки)
         self.adb.shell(f"rm -f {BTOUT_MAC} {BTOUT_STATE}; start-stop-daemon -K -p {BTOUT_SD} 2>/dev/null; "
@@ -4482,12 +3937,12 @@ echo @@BLUEZ
     # ---------- логи / консоль / система ----------
     def logs_list(self):
         out, _, _ = self.adb.shell(f"ls {LOGS_DIR}")
-        return ["dmesg"] + sorted(strip_ansi(out).split())
+        return ["panel", "dmesg"] + sorted(strip_ansi(out).split())
 
     def log(self, name, lines):
         lines = max(10, min(5000, int(lines)))
-        if name == "panel":   # журнал самой панели — на компьютере, не на колонке
-            return {"text": JOURNAL.text(lines) or "Журнал пуст."}
+        if name == "panel":
+            return {"text": JOURNAL.text(lines)}
         if name == "dmesg":
             cmd = f"dmesg | tail -n {lines}"
         elif name in self.logs_list():
@@ -4589,7 +4044,7 @@ class Terminal:
         cmd = (f"echo $$ $(tty) > {self.info}; stty rows {rows} cols {cols} 2>/dev/null; "
                f"export TERM=xterm-256color PS1={shlex.quote(self.PS1)}; {YAM_PATH}cd /data 2>/dev/null; exec sh")
         self.proc = subprocess.Popen(adb._base() + ["shell", cmd], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, bufsize=0)
+                                     stderr=subprocess.STDOUT, bufsize=0, **_SUBPROCESS_WINDOW_OPTIONS)
 
     def _pump(self):
         try:
@@ -4643,7 +4098,32 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _discard_rejected_body(self):
+        # On Windows closing with an unread small POST can reset TCP before the
+        # browser sees the rejection. Never interpret, store or wait on a large body.
+        if self.command != "POST" or getattr(self, "_body_read", False):
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return
+        if not 0 < length <= 65536:
+            return
+        old_timeout = self.connection.gettimeout()
+        try:
+            self.connection.settimeout(.25)
+            self.rfile.read(length)
+            self._body_read = True
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(old_timeout)
+
     def _send(self, code, body, ctype="application/json; charset=utf-8", headers=()):
+        if code >= 400:
+            self._discard_rejected_body()
+        if self.command == "POST":
+            JOURNAL.record(urlparse(self.path).path, code)
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
@@ -4654,12 +4134,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in headers:
             self.send_header(k, v)
-        try:
-            self.end_headers()
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            # вкладку закрыли или перезагрузили, пока колонка отвечала: ответ некому отдать, это не ошибка
-            self.close_connection = True
+        self.end_headers()
+        self.wfile.write(body)
 
     # ---------- доступ ----------
     @property
@@ -4736,6 +4212,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"})
 
     def _body(self):
+        self._body_read = True
         n = int(self.headers.get("Content-Length") or 0)
         return self.rfile.read(n) if n else b""
 
@@ -4743,131 +4220,15 @@ class Handler(BaseHTTPRequestHandler):
         b = self._body()
         return json.loads(b) if b else {}
 
-    # Поиск колонок идёт в фоне (секунды), экран подключения опрашивает ход: GET /api/conn/find
-    finder = {"running": False, "stage": "", "done": 0, "total": 0, "nets": [], "found": [], "error": None, "auto": None, "t": 0}
-    finder_lock = threading.Lock()
-
-    def _conn_find(self, start=False):
-        """Колонки в локальных сетях этого компьютера — то же, что --find, но из панели."""
-        f = Handler.finder
-        if start:
-            if os.environ.get("PANEL_GATEWAY_SECRET"):
-                raise AdbError("в режиме нескольких колонок адреса задаются в speakers.json")
-            with Handler.finder_lock:
-                if not f["running"]:
-                    f.update(running=True, stage="nets", done=0, total=0, nets=[], found=[], error=None, auto=None, t=time.time())
-                    threading.Thread(target=self._conn_find_run, daemon=True, name="find").start()
-        current = self.panel.adb.serial
-        return {**f, "current": current, "found": [{**x, "current": x["serial"] == current} for x in f["found"]]}
-
-    def _conn_find_run(self):
-        import profiles
-        f = Handler.finder
-        try:
-            nets = local_networks()
-            if not nets:
-                raise AdbError("не нашлось домашней сети: компьютер не в локальной сети, или панель в Docker без сети хоста")
-            f["nets"] = [str(n) for n in nets]
-            found = find_devices(self.panel.adb.adb, nets, lambda stage, done, total: f.update(stage=stage, done=done, total=total))
-            f["found"] = [{"serial": s, "ip": s.rpartition(":")[0], "model": m, "name": profiles.PROFILES[m]["name"]}
-                          for s, m, _ in found]
-            JOURNAL.add(f"поиск колонок в {', '.join(f['nets'])}: найдено {len(found)}")
-            # первый запуск без адреса и колонка в сети одна — подключаемся сами, даже если страницу закрыли
-            if not self.panel.adb.serial and len(found) == 1:
-                f["auto"] = found[0][0]
-                self._conn_use(found[0][0])
-        except Exception as e:  # noqa: BLE001
-            f["error"] = str(e)
-            JOURNAL.add(f"поиск колонок: {e}", "warn")
-        finally:
-            f.update(running=False, stage="done")
-
-    def _conn_use(self, serial):
-        """Подключиться к другой колонке: запоминаем адрес и перезапускаем панель с ним."""
-        if os.environ.get("PANEL_GATEWAY_SECRET"):
-            raise AdbError("в режиме нескольких колонок адреса задаются в speakers.json")
-        serial = normalize_device(serial)
-        if not serial or not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}:\d{1,5}", serial) \
-                or not ipaddress.ip_address(serial.rpartition(":")[0]).is_private:
-            raise AdbError("нужен IP колонки в домашней сети, например 192.168.1.50")
-        save_settings({**load_settings(), "device": serial})
-        JOURNAL.add(f"выбрана колонка {serial} — перезапуск панели")
-        threading.Timer(0.5, restart_self, kwargs={"device": serial}).start()
-        return {"ok": True, "serial": serial}
-
-    def _report(self):
-        """Отчёт для Issue: окружение, колонка, хук, своё на колонке и хвост журнала — без личного (redact)."""
-        import profiles
-        p, out = self.panel, []
-        def row(name, fn):
-            try:
-                out.append(f"- {name}: {fn()}")
-            except Exception as e:  # noqa: BLE001 — отчёт собираем даже наполовину
-                out.append(f"- {name}: не удалось узнать ({type(e).__name__}: {e})")
-        model, auto = PANEL_PROFILE
-        out.append("## Панель")
-        row("Версия", lambda: f"{VERSION}, установка: {self.updater.kind() if self.updater else '?'}")
-        row("Профиль", lambda: f"{profiles.PROFILES[model]['name']} ({model}{', определён сам' if auto else ', задан вручную'})")
-        row("Система", lambda: f"{platform.system()} {platform.release()} ({platform.machine()}), Python {platform.python_version()}")
-        row("adb", lambda: ".".join(map(str, adb_version(p.adb.adb) or ())) or "?")
-        row("ffmpeg", lambda: "есть" if p.ffmpeg else "нет")
-        row("Вход в Яндекс", lambda: "есть" if AUTH_FILE.exists() else "нет")
-        out.append("\n## Колонка")
-        row("Связь", lambda: f"{p.conn.state}, попыток подключения: {p.conn.attempts}" if p.conn else "?")
-        if p.conn and p.conn.online:
-            row("Прошивка", lambda: p.version().get("quasar_version"))
-            row("Плата и ядро", lambda: " · ".join(x for x in strip_ansi(p.adb.shell(
-                "cat /proc/device-tree/model 2>/dev/null | tr -d '\\000'; echo; uname -rm; "
-                "df -h /data 2>/dev/null | tail -1 | awk '{print \"свободно в /data: \" $4}'", check=False)[0]).splitlines() if x.strip()))
-            def hook():
-                h = p.hook_status()
-                state = "подключён" + ("" if h["fresh"] else ", устарел") if h["hook"] else "не подключён"
-                return (f"{state}; держится на нём: {', '.join(h['users']) or 'ничего'}"
-                        + ("" if h["possible"] else "; rootkeeper.sh нет, /etc/init.d только для чтения")
-                        + (f"; через {h['file']}" if h["hook"] else ""))
-            row("Хук загрузки", hook)
-            row("Своё на колонке", lambda: ", ".join(f"{i['name']}" + (f" ({i['detail']})" if i.get("detail") else "")
-                                                     for i in p.footprint()["items"] if i["on"]) or "ничего")
-        out.append("\n## Журнал панели (последние 150 записей)\n```\n" + (JOURNAL.text(150) or "пусто") + "\n```")
-        return {"text": redact("\n".join(out)) + "\n"}
-
-    # Действия, которые шлются потоком (ползунки, живой предпросмотр): в журнал — только ошибки
-    JOURNAL_QUIET = {"/api/volume", "/api/ring", "/api/clock", "/api/radio/miss-seen", "/api/music/cmd"}
-    # Что из тела запроса можно показать в журнале: имена и режимы, но не тексты, ключи и пароли
-    JOURNAL_KEYS = ("name", "kind", "action", "which", "mode", "enabled", "id", "type")
-
-    def _journal(self, error=None, started=None):
-        path = urlparse(self.path).path
-        if self.command == "GET" and not error:
-            return
-        if not error and path in self.JOURNAL_QUIET:
-            return
-        d = getattr(self, "_jdata", None) or {}
-        detail = ", ".join(f"{k}={str(d[k])[:60]}" for k in self.JOURNAL_KEYS
-                           if isinstance(d.get(k), (str, int, bool)) and not isinstance(d.get(k), float))
-        name = unquote(self.headers.get("X-Sound") or self.headers.get("X-Filename") or "")
-        detail = ", ".join(x for x in (detail, name and f"файл={name[:60]}") if x)
-        took = f" за {time.time() - started:.1f} с" if started and time.time() - started >= 1 else ""
-        head = f"{self.command} {path}" + (f" ({detail})" if detail else "")
-        JOURNAL.add(f"{head}: {error}" if error else f"{head} — ок{took}", "error" if error else "info")
-
     def _handle(self, fn):
-        started, error = time.time(), None
         try:
             self._send(200, fn())
         except (AdbError, glagol.AuthError, ValueError, KeyError) as e:
-            error = f"{e}" if not isinstance(e, KeyError) else f"нет поля {e}"
             self._send(400, {"error": str(e)})
         except subprocess.TimeoutExpired as e:
-            error = f"таймаут: {e}"
-            self._send(504, {"error": error})
+            self._send(504, {"error": f"таймаут: {e}"})
         except Exception as e:  # noqa: BLE001
-            error = f"{type(e).__name__}: {e}"
-            self._send(500, {"error": error})
-        try:   # журнал — никогда не причина для ошибки ответа
-            self._journal(error, started)
-        except Exception:  # noqa: BLE001
-            pass
+            self._send(500, {"error": f"{type(e).__name__}: {e}"})
 
     def _download(self, path):
         try:
@@ -4915,11 +4276,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _offline(self, path):
         """Пока колонки нет, API отвечает одним понятным статусом вместо ошибок adb."""
-        # отчёт для Issue нужнее всего как раз тогда, когда колонка не подключается
-        if path.startswith("/api/") and not path.startswith("/api/conn") and path != "/api/report" and not self.panel.conn.online:
+        if path.startswith("/api/") and not path.startswith("/api/conn") and path != "/api/scenes" and not self.panel.conn.online:
             self._send(503, {"error": "Колонка не подключена", "offline": True})
             return True
         return False
+
+    def _report(self):
+        import platform
+        # Only fixed fields: never include device logs, identifiers, filenames,
+        # exceptions, configuration, authentication or recognised speech.
+        p=self.panel
+        rows=['## Панель',f'- Версия форка: {VERSION}',f'- Основа переноса: {UPSTREAM_VERSION}',
+              f'- Система: {platform.system()}, Python {platform.python_version()}',
+              '- Связь с колонкой: '+('есть' if p.conn.online else 'нет'),
+              '- ffmpeg: '+('есть' if p.ffmpeg else 'нет'),
+              '- Автопроверка обновлений оригинала: выключена',
+              '\n## Журнал действий без содержимого запросов\n```',JOURNAL.text(150) or 'пусто','```']
+        return {'text':'\n'.join(rows)+'\n'}
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -4940,8 +4313,18 @@ class Handler(BaseHTTPRequestHandler):
                               headers=[("Content-Disposition", 'attachment; filename="stantsiya-panel-ca.crt"')])
         if u.path == "/api/conn":
             return self._send(200, self.panel.conn.info())
-        if u.path == "/api/conn/find":
-            return self._handle(self._conn_find)
+        if u.path == "/api/scenes":
+            return self._send(200, self.panel.scenes.status())
+        if u.path == "/api/logs" and not self.panel.conn.online:
+            return self._send(200, ["panel"])
+        if u.path == "/api/extensions":
+            return self._send(200, {"revision": 3, "journal": True, "scenes": True, "sounds": True, "animations": True, "yam2": True})
+        if u.path == "/api/report":
+            return self._handle(self._report)
+        if u.path == "/api/journal":
+            return self._send(200, {"text": JOURNAL.text()})
+        if u.path == "/api/log" and parse_qs(u.query).get("name") == ["panel"]:
+            return self._handle(lambda: {"text": JOURNAL.text(parse_qs(u.query).get("lines", [300])[0])})
         if self._offline(u.path):
             return
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
@@ -4949,9 +4332,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._terminal(q)
         p = self.panel
         routes = {
+            "/api/assistant": p.assistant_status,
+            "/api/hook": p.hook_status,
+            "/api/radio": p.radio_status,
+            "/api/radio/search": lambda: p.radio_search(q.get("q", ""), q.get("country", "")),
+            "/api/anim/custom": lambda: p.animations.overrides.status(),
+            "/api/anim/original": lambda: p.animations.frames(q.get("name", ""), original=True),
             "/api/status": p.status,
             "/api/sounds": p.sounds,
-            "/api/sounds/custom": p.sounds_custom,
+            "/api/sounds/custom": p.sound_overrides.status,
             "/api/patterns": p.patterns,
             "/api/logs": p.logs_list,
             "/api/log": lambda: p.log(q.get("name", ""), q.get("lines", 300)),
@@ -4964,11 +4353,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/leds/live": p.leds.get,
             "/api/display": p.display_status,
             "/api/ring/frames": lambda: p.ring_frames(q.get("name", "")),
-            "/api/anim/custom": p.anim_custom,
-            "/api/hook": p.hook_status,
-            "/api/report": self._report,
-            "/api/anim/original": lambda: p.anim_original(q.get("kind", ""), q.get("name", "")),
-            "/api/led/patterns": p.led_patterns,
+            "/api/yam2/status": lambda: p.yam2_status(q.get("refresh") == "1"),
+            "/api/yam2/preflight": p.yam2_preflight,
+            "/api/yam2/packages": p.yam2_packages,
+            "/api/yam2/catalog": lambda: p.yam2_catalog(q.get("refresh") == "1"),
+            "/api/yam2/log": lambda: p.yam2_service_log(q.get("id")),
             "/api/yam/status": p.yam_status,
             "/api/music": p.music,
             "/api/music/info": lambda: p.music_info(q.get("id", "")),
@@ -4984,35 +4373,26 @@ class Handler(BaseHTTPRequestHandler):
             "/api/yam/logs": lambda: p.yam_logs(q.get("id", "")),
             "/api/yam/settings": p.yam_settings,
             "/api/yam/version": lambda: p.yam_version(q.get("refresh") == "1"),
-            "/api/yam2/status": lambda: p.yam2_status(q.get("refresh") == "1"),
-            "/api/yam2/packages": p.yam2_packages,
-            "/api/yam2/catalog": lambda: p.yam2_catalog(q.get("refresh") == "1"),
-            "/api/yam2/log": lambda: p.yam2_service_log(q.get("id", "")),
             "/api/alarms": p.alarms,
-            "/api/scenes": p.scenes,
             "/api/footprint": p.footprint,
             "/api/privacy": p.privacy_status,
-            "/api/assistant": p.assistant_status,
-            "/api/radio": p.radio_status,
-            "/api/radio/search": lambda: p.radio_search(q.get("q", ""), q.get("country", "")),
             "/api/panel/version": lambda: self.updater.check(q.get("refresh") == "1"),
             "/api/bt": p.bt_state,
+            "/api/scenes": p.scenes.status,
             "/api/metrics": lambda: p.metrics.get(q.get("range", 3600)),
         }
         if u.path in routes:
             return self._handle(routes[u.path])
+        if u.path == "/api/radio/logo":
+            try:
+                logo = p.radio_logo(q.get("name", ""))
+            except Exception:
+                return self._send(404, {"error":"Логотип недоступен"})
+            return self._send(200, logo[0], logo[1]) if logo else self._send(404,{"error":"Логотип не найден"})
         if u.path == "/api/fs/download":
             return self._download(q.get("path", ""))
         if u.path in ("/", "/index.html"):
             return self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
-        if u.path == "/api/radio/logo":
-            try:
-                logo = self.panel.radio_logo(q.get("name", ""))
-            except AdbError as e:
-                return self._send(400, {"error": str(e)})
-            if not logo:
-                return self._send(404, {"error": "логотип не найден"})
-            return self._send(200, logo[0], logo[1], headers=[("Content-Security-Policy", "default-src 'none'")])
         if u.path.startswith("/static/"):
             f = (STATIC / unquote(u.path[len("/static/"):])).resolve()
             if f.is_file() and STATIC in f.parents:
@@ -5031,28 +4411,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._panel_auth_post(u.path, d)
         if u.path == "/api/conn/retry":
             return self._send(200, self.panel.conn.retry_now())
-        if u.path == "/api/conn/find":
-            return self._handle(lambda: self._conn_find(start=True))
-        if u.path == "/api/conn/use":
-            try:
-                d = self._json()
-            except ValueError:
-                d = {}
-            self._jdata = d if isinstance(d, dict) else {}
-            return self._handle(lambda: self._conn_use(self._jdata.get("serial")))
         if self._offline(u.path):
             return
         p = self.panel
+        if u.path == "/api/sounds/replace":
+            n = int(self.headers.get("Content-Length") or 0)
+            if not 0 < n <= p.sound_overrides.LIMIT:
+                return self._send(413, {"error": "Аудиофайл: до 50 МБ"})
+            name = unquote(self.headers.get("X-Sound", ""))
+            return self._handle(lambda: p.sound_overrides.replace(name, self._body()))
         if u.path == "/api/upload":
             name = unquote(self.headers.get("X-Filename", "upload.bin"))
             body = self._body()
             return self._handle(lambda: p.play_upload(name, body))
-        if u.path == "/api/sounds/replace":
-            name = unquote(self.headers.get("X-Sound", ""))
-            body = self._body()
-            return self._handle(lambda: p.sound_replace(name, body))
-        if u.path == "/api/led/gif":
-            return self._handle(lambda: p.led_gif(self._body()))
         if u.path == "/api/boot/sound":
             name = unquote(self.headers.get("X-Filename", "sound"))
             body = self._body()
@@ -5077,30 +4448,54 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             return self._handle(lambda: p.fs_upload(directory, name, body))
         d = self._json()
-        self._jdata = d if isinstance(d, dict) else {}
         routes = {
+            "/api/sounds/reset": lambda: p.sound_overrides.reset(d.get("name")),
+            "/api/sounds/play-original": lambda: p.sound_overrides.play_original(d.get("name")),
+            "/api/scenes": lambda: p.scenes.save(d),
+            "/api/scenes/deploy": p.native_scenes.deploy,
+            "/api/hook/repair": lambda: (_ for _ in ()).throw(ValueError('Автоматическая правка системного init отключена. Существующий запуск будильника сохраняется.')),
+            "/api/scenes/run": lambda: p.scenes.start_run(d.get("id")),
+            "/api/scenes/stop": lambda: p.scenes.cancel(d.get("id")),
+            "/api/assistant": lambda: p.assistant_set(d),
+            "/api/assistant/install": p.assistant_install,
+            "/api/assistant/start": p.assistant_start,
+            "/api/assistant/ask": lambda: p.assistant_ask(d.get("text")),
+            "/api/assistant/stop": lambda: p.assistant_command({"stop": True}),
+            "/api/assistant/mode": lambda: p.assistant_command({"mode": bool(d.get("on"))}),
+            "/api/assistant/models": lambda: p.assistant_models(d),
+            "/api/assistant/remove": p.assistant_remove,
+            "/api/radio": lambda: p.radio_set(d),
+            "/api/radio/play": lambda: p.radio_play(d),
+            "/api/radio/alice": lambda: p.radio_alice(d.get("name")),
+            "/api/radio/stop": p.radio_stop,
+            "/api/radio/check": lambda: p.radio_check(d.get("url")),
+            "/api/radio/miss-seen": lambda: p.assistant_command({"radio_miss_seen": True}),
+            "/api/ring/try": lambda: p.animations.try_text(d.get("text"), d.get("seconds",5)),
+            "/api/anim/my": lambda: p.animations.save(d.get("kind"),d.get("name"),d.get("text"),d.get("frames")),
+            "/api/anim/my/delete": lambda: p.animations.delete(d.get("kind"),d.get("name")),
+            "/api/anim/install": lambda: p.animations.overrides.replace(d.get("name"),d.get("text", "").encode("utf8")) if d.get("kind")=="ring" else (_ for _ in ()).throw(ValueError("У Лайт 1 нет дисплея")),
+            "/api/anim/reset": lambda: p.animations.overrides.reset(d.get("name")),
+            "/api/say": lambda: p.say(d.get("text"), d.get("voice", "alice")),
             "/api/volume": lambda: p.set_volume(d),
             "/api/play": lambda: p.play_system(d["name"]),
-            "/api/sounds/reset": lambda: p.sound_reset(d["name"]),
-            "/api/sounds/play-original": lambda: p.sound_play_original(d["name"]),
             "/api/stop": p.stop_sound,
             "/api/pattern": lambda: p.play_pattern(d["kind"], d["name"], d.get("seconds", 5)),
             "/api/pattern/stop": lambda: p.stop_pattern(d.get("kind")),
             "/api/ring": lambda: p.ring(d),
-            "/api/led": lambda: p.led(d),
             "/api/clock": lambda: p.clock(d),
             "/api/clock/play": lambda: p.play_clock(d["frames"], d.get("seconds", 10)),
-            "/api/anim/install": lambda: p.anim_install(d.get("kind"), d.get("name"), d.get("frames"), d.get("text")),
-            "/api/anim/reset": lambda: p.anim_reset(d.get("kind"), d.get("name")),
-            "/api/anim/my": lambda: p.my_anim_save(d.get("kind"), d.get("name"), d.get("frames"), d.get("text")),
-            "/api/anim/my/delete": lambda: p.my_anim_delete(d.get("kind"), d.get("name")),
-            "/api/hook/repair": p.hook_repair,
-            "/api/ring/try": lambda: p.ring_try(d.get("text"), d.get("seconds", 5)),
             "/api/clock/boot": lambda: p.boot_install(d["frames"]),
             "/api/clock/boot/reset": p.boot_reset,
             "/api/boot/sound/reset": p.boot_sound_reset,
             "/api/boot/sound/play": lambda: p.boot_sound_play(d.get("which", "default")),
             "/api/clock/boot/always": lambda: p.boot_always(bool(d["enabled"])),
+            "/api/yam2/install": p.yam2_install,
+            "/api/yam2/update": p.yam2_update,
+            "/api/yam2/uninstall": p.yam2_uninstall,
+            "/api/yam2/registry": p.yam2_registry_add,
+            "/api/yam2/pkg": lambda: p.yam2_pkg(d.get("action"), d.get("name"), d.get("yes") is True),
+            "/api/yam2/doctor": lambda: p.yam2_doctor(d.get("repair") is True),
+            "/api/yam2/service": lambda: p.yam2_service(d.get("id"), d.get("action"), d.get("stop_legacy") is True),
             "/api/yam/start": p.yam_start,
             "/api/yam/install-daemon": lambda: p.yam_install_daemon(**({"drop_backups": True} if d.get("drop_backups") else {})),
             "/api/display": lambda: p.display_set(d),
@@ -5117,18 +4512,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/yam/install": lambda: p.yam_install(d["id"], d["version"]),
             "/api/yam/action": lambda: p.yam_action(d["action"], d["id"]),
             "/api/yam/settings": lambda: p.yam_settings(d),
-            "/api/yam2/install": p.yam2_install,
-            "/api/yam2/update": p.yam2_update,
-            "/api/yam2/uninstall": p.yam2_uninstall,
-            "/api/yam2/registry": p.yam2_registry_add,
-            "/api/yam2/doctor": lambda: p.yam2_doctor(bool(d.get("repair"))),
-            "/api/yam2/pkg": lambda: p.yam2_pkg(d.get("action"), d["name"], bool(d.get("yes"))),
-            "/api/yam2/service": lambda: p.yam2_service(d["id"], d["action"], bool(d.get("stop_legacy"))),
             "/api/bt": lambda: p.bt_action(d),
-            "/api/btout/scan": lambda: p.btout_scan(d.get("seconds", 12)),
-            "/api/btout/use": lambda: p.btout_use(d.get("mac")),
+            "/api/btout/scan": lambda: p.btout_scan(d.get('seconds',12)),
+            "/api/btout/use": lambda: p.btout_use(d.get('mac')),
             "/api/btout/off": p.btout_off,
-            "/api/btout/volume": lambda: p.btout_volume(d.get("level", 50)),
+            "/api/btout/volume": lambda: p.btout_volume(d.get('level',50)),
             "/api/system": lambda: p.system(d["action"]),
             "/api/fs/write": lambda: p.fs_write(d["path"], d["text"]),
             "/api/fs/delete": lambda: p.fs_delete(d["path"]),
@@ -5142,27 +4530,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/footprint/reset": p.footprint_reset,
             "/api/privacy": lambda: p.privacy_set(bool(d.get("enabled"))),
             "/api/privacy/purge": p.privacy_purge,
-            "/api/assistant": lambda: p.assistant_set(d),
-            "/api/assistant/install": p.assistant_install,
-            "/api/assistant/start": p.assistant_start,
-            "/api/assistant/ask": lambda: p.assistant_ask(d.get("text")),
-            "/api/assistant/stop": lambda: p.assistant_command({"stop": True}),
-            "/api/assistant/mode": lambda: p.assistant_command({"mode": bool(d.get("on"))}),
-            "/api/radio": lambda: p.radio_set(d),
-            "/api/radio/play": lambda: p.radio_play(d),
-            "/api/radio/stop": p.radio_stop,
-            "/api/radio/miss-seen": lambda: p.assistant_command({"radio_miss_seen": True}),
-            "/api/radio/check": lambda: p.radio_check(d.get("url")),
-            "/api/radio/alice": lambda: p.radio_alice(d.get("name")),
-            "/api/assistant/remove": p.assistant_remove,
-            "/api/assistant/models": lambda: p.assistant_models(d),
             "/api/panel/update": lambda: self.updater.update(),
             "/api/metrics/clear": lambda: p.metrics.clear(),
             "/api/alarms/uninstall": p.alarm_uninstall,
-            "/api/scenes": lambda: p.scenes_save(d),
-            "/api/scenes/run": lambda: p.scene_run(d.get("id")),
-            "/api/say": lambda: p.say(d.get("text"), d.get("voice", "alice")),
-            "/api/scenes/stop": lambda: p.scene_stop(d.get("id")),
         }
         if u.path in routes:
             return self._handle(routes[u.path])
@@ -5173,10 +4543,14 @@ class PanelUpdater:
     """Проверка новых релизов панели на GitHub и обновление — в зависимости от того, как панель установлена:
     zip (Windows-сборка, Download ZIP) — скачать релиз и заменить файлы панели; git — git pull --ff-only;
     docker — только подсказать команду (образ изнутри не обновить)."""
-    FILES = ("server.py", "access.py", "glagol.py", "profiles.py", "managed_yam.py", "multi.py", "pyadb.py", "speakers.example.json", "VERSION", "LICENSE", "README.md", "CONTRIBUTION.md", "start.bat", "start.sh", "start.command",
-             "Dockerfile", "docker-compose.yml")
+    FILES = ("server.py", "access.py", "glagol.py", "profiles.py", "managed_yam.py", "multi.py", "speakers.example.json", "VERSION", "LICENSE", "README.md", "CONTRIBUTION.md", "start.bat", "start.sh", "start.command",
+             "Dockerfile", "docker-compose.yml", "alarm_intent.py", "alarm_music.py", "audio_stream.py",
+             "light_profiles.py", "music_artwork.py", "music_library.py", "music_lights.py", "music_metadata.py",
+             "music_spectrum.py", "native_alarms.py", "playback_order.py", "voice_bridge.py", "voice_catalog.py",
+             "voice_events.py", "yandex_library.py", "requirements-local.txt", "panel_journal.py",
+             "pyadb.py", "panel_scenes.py", "graph_scenes.py", "native_scenes.py", "animation_library.py", "ring_animations.py", "sound_overrides.py")
     DIRS = ("static", "device")
-    OBSOLETE = ("3d", "tools", "docs")  # папки прежних версий: модель переехала в static/models, остальное не нужно
+    OBSOLETE = ("3d", "tools")  # docs/modernization contains the local validation record.
 
     def __init__(self, restart=None):
         self.restart = restart or restart_self
@@ -5215,7 +4589,7 @@ class PanelUpdater:
                 err = "релизов пока нет или репозиторий закрыт" if e.code == 404 else f"GitHub ответил {e.code}"
             except (OSError, ValueError) as e:
                 err = f"GitHub недоступен: {e}"
-        res = {"version": VERSION, "install": self.kind(), "repo": f"https://github.com/{REPO}", "checked": self.cache[0] or None}
+        res = {"local_fork": True, "version": VERSION, "install": self.kind(), "repo": f"https://github.com/{REPO}", "checked": self.cache[0] or None}
         if err and rel is None:
             return {**res, "error": err}
         latest = rel.get("tag_name", "").lstrip("v")
@@ -5224,75 +4598,23 @@ class PanelUpdater:
                 **({"error": err} if err else {})}
 
     def update(self):
-        if not self.lock.acquire(blocking=False):
-            raise AdbError("обновление уже идёт")
-        try:
-            info = self.check(refresh=True)
-            if info.get("error") and not info.get("latest"):
-                raise AdbError(info["error"])
-            if not info.get("update"):
-                raise AdbError("уже установлена последняя версия")
-            kind = info["install"]
-            if kind == "docker":
-                raise AdbError("в Docker обновите образ: docker compose pull && docker compose up -d")
-            if kind == "android":
-                raise AdbError("в приложении для Android установите новый APK со страницы релиза")
-            if kind == "git":
-                r = subprocess.run(["git", "-C", str(ROOT), "pull", "--ff-only"], capture_output=True, text=True, timeout=120)
-                if r.returncode:
-                    raise AdbError("git pull не удался: " + (r.stderr or r.stdout).strip()[-300:])
-            else:
-                self._from_zip(info["latest"])
-            threading.Timer(1.0, self.restart).start()
-            return {"ok": True, "version": info["latest"], "install": kind}
-        finally:
-            self.lock.release()
+        raise AdbError("Прямое обновление из upstream отключено: оно заменит доработки этой панели. Доступна ручная проверка и выборочный перенос.")
 
     def repair_missing(self):
-        """Обновление из архива копирует только файлы из списка старой версии: новых модулей (managed_yam.py
-        после 0.1.3) после него нет. Докачиваем исходники своей же версии, пока профили их не импортировали."""
+        """A fork cannot repair itself using unrelated upstream source files."""
         missing = [f for f in self.FILES if f.endswith(".py") and not (ROOT / f).exists()]
-        if not missing or self.kind() != "zip":
-            return
-        print(f"Нет {', '.join(missing)} — докачиваю файлы версии {VERSION} с GitHub…")
-        try:
-            self._from_zip(VERSION)
-        except (OSError, AdbError, zipfile.BadZipFile) as e:
-            print(f"Не удалось: {e}. Часть функций будет недоступна до следующего обновления.")
+        if missing:
+            print("Отсутствуют локальные модули: " + ", ".join(missing)
+                  + ". Восстановите их из резервной копии этой панели; замена из upstream отключена.")
+        return {"missing": missing}
 
     def _from_zip(self, version):
-        """Исходники релиза с GitHub → поверх файлов панели. Данные (.yandex_auth.json и пр.), runtime и
-        platform-tools не трогаем — их в архиве нет, а заменяем только файлы самой панели."""
-        url = f"https://github.com/{REPO}/archive/refs/tags/v{version}.zip"
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "webpanel"}), timeout=120) as r:
-            blob = r.read()
-        with zipfile.ZipFile(io.BytesIO(blob)) as z:
-            names = [n for n in z.namelist() if not n.endswith("/")]
-            prefix = names[0].split("/", 1)[0] + "/" if names else ""
-            if not any(n == prefix + "server.py" for n in names):
-                raise AdbError("в архиве релиза нет server.py")
-            for n in names:
-                rel = n[len(prefix):]
-                top = rel.split("/", 1)[0]
-                if rel not in self.FILES and top not in self.DIRS:
-                    continue
-                if ".." in Path(rel).parts:
-                    continue
-                dst = ROOT / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dst.with_name(dst.name + ".upd")
-                tmp.write_bytes(z.read(n))
-                os.replace(tmp, dst)
-                if rel in ("start.sh", "start.command"):
-                    os.chmod(dst, 0o755)
-        for name in self.OBSOLETE:
-            shutil.rmtree(ROOT / name, ignore_errors=True)
+        raise AdbError("Замена исходников форка архивом оригинала отключена")
 
 
 # Платформа в device-tree (compatible «yandex,plum», модель «Yandex Plum EVT2») → профиль колонки.
 # Имя хоста тут не годится: владелец мог его переименовать.
-PLATFORM_MODELS = {"plum": "lite2", "pickle": "mini3pro", "bergamot": "mini3", "yandexmidi": "station2",
-                   "station-mini2": "mini2", "station-micro": "lite", "yandexmicro": "lite"}
+PLATFORM_MODELS = {"station-micro": "lite1", "plum": "lite2", "pickle": "mini3pro", "bergamot": "mini3", "yandexmidi": "station2"}
 
 
 def detect_model(adb):
@@ -5310,7 +4632,7 @@ def local_networks():
     """Подсети /24 этого компьютера, где может быть колонка: частные адреса, кроме VPN-туннелей (/32)."""
     nets = []
     try:
-        out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
+        out = subprocess.run(["ip", "-4", "-o", "addr"], capture_output=True, text=True, timeout=5, **_SUBPROCESS_WINDOW_OPTIONS).stdout
         addrs = [m.group(1, 2) for m in re.finditer(r"inet (\d+\.\d+\.\d+\.\d+)/(\d+)", out)]
     except (OSError, subprocess.SubprocessError):
         addrs = []
@@ -5330,17 +4652,10 @@ def local_networks():
     return nets
 
 
-def find_devices(adb_path, nets, progress=None):
+def find_devices(adb_path, nets):
     """Ищет колонки в подсетях: открытый порт adb 5555, затем проверка платы по device-tree.
-    progress(этап, сделано, всего) — для экрана подключения. → [(«ip:5555», профиль, имя хоста)]."""
+    → [(«ip:5555», профиль, имя хоста)]."""
     from concurrent.futures import ThreadPoolExecutor
-    progress = progress or (lambda *a: None)
-    lock, done = threading.Lock(), [0]
-
-    def tick(stage, total):
-        with lock:
-            done[0] += 1
-            progress(stage, done[0], total)
 
     def port_open(ip):
         try:
@@ -5348,29 +4663,18 @@ def find_devices(adb_path, nets, progress=None):
             return ip
         except OSError:
             return None
-        finally:
-            tick("ports", len(hosts))
 
     hosts = [str(h) for net in nets for h in net.hosts()]
-    progress("ports", 0, len(hosts))
     with ThreadPoolExecutor(64) as pool:
         candidates = [ip for ip in pool.map(port_open, hosts) if ip]
-    done[0] = 0
-    progress("check", 0, len(candidates))
 
     def check(ip):
-        try:
-            return _check(ip)
-        finally:
-            tick("check", len(candidates))
-
-    def _check(ip):
         serial = f"{ip}:5555"
         try:
-            subprocess.run([adb_path, "connect", serial], capture_output=True, timeout=10)
+            subprocess.run([adb_path, "connect", serial], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)
             out = subprocess.run([adb_path, "-s", serial, "shell",
                                   "cat /proc/device-tree/compatible 2>/dev/null | tr '\\000' ' '; echo; hostname"],
-                                 capture_output=True, timeout=10).stdout.decode("utf-8", "replace")
+                                 capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS).stdout.decode("utf-8", "replace")
         except subprocess.TimeoutExpired:
             out = ""
         text = strip_ansi(out).strip().lower()
@@ -5378,7 +4682,7 @@ def find_devices(adb_path, nets, progress=None):
             if "yandex" in text and re.search(rf"(^|[^a-z0-9]){platform}([^a-z0-9]|$)", text):
                 return serial, model, strip_ansi(out).strip().splitlines()[-1].strip()
         # не колонка (телевизор, приставка) — не оставляем ей висящее подключение
-        subprocess.run([adb_path, "disconnect", serial], capture_output=True, timeout=10)
+        subprocess.run([adb_path, "disconnect", serial], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)
         return None
 
     with ThreadPoolExecutor(8) as pool:
@@ -5434,35 +4738,29 @@ def watch_model(adb, conn, active):
         restart_self()
 
 
-def restart_self(device=None):
-    """Перезапуск сервера тем же интерпретатором и с теми же аргументами (без --open: браузер уже открыт).
-    device — с другой колонкой: старые --device/--find заменяем (иначе аргумент перебил бы запомненный адрес)."""
+def restart_self():
+    """Перезапуск сервера тем же интерпретатором и с теми же аргументами (без --open: браузер уже открыт)."""
     args = [a for a in sys.argv if a != "--open"]
-    if device:
-        out, i = [], 0
-        while i < len(args):
-            a = args[i]
-            if a == "--device" or (a == "--find" and i + 1 < len(args) and not args[i + 1].startswith("-")):
-                i += 2   # у --find подсеть необязательна
-                continue
-            if a != "--find" and not a.startswith(("--device=", "--find=")):
-                out.append(a)
-            i += 1
-        args = out + ["--device", device]
     try:
         Handler.panel.metrics._save()
     except Exception:  # noqa: BLE001
         pass
     sys.stdout.flush()
-    if RESTART_HOOK:     # Android: Python внутри приложения, exec некуда — перезапуск делает служба
-        return RESTART_HOOK(args[1:])
     os.execv(sys.executable, [sys.executable] + args)
 
 
-RESTART_HOOK = None   # (аргументы без имени скрипта) → перезапуск снаружи, см. android/
+class PanelHTTPServer(ThreadingHTTPServer):
+    # SO_REUSEADDR on Windows lets two panels listen on the same address.
+    allow_reuse_address = os.name != "nt"
+    allow_reuse_port = False
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
-class TLSServer(ThreadingHTTPServer):
+class TLSServer(PanelHTTPServer):
     """HTTPS-сервер. TLS-рукопожатие — в потоке запроса, чтобы медленный клиент не держал accept()."""
 
     def __init__(self, addr, handler, ctx):
@@ -5517,7 +4815,7 @@ def main():
                     help="где хранить токен, пароль, сертификаты и историю (по умолчанию — рядом с server.py) [PANEL_DATA_DIR]")
     ap.add_argument("--open", action="store_true", help="открыть панель в браузере после запуска")
     ap.add_argument("--model", choices=[*profiles.PROFILES, "auto"], default=env("PANEL_MODEL", "auto"),
-                    help="профиль колонки: lite2, lite, mini3pro, mini3, mini2, station2 или auto — определить по плате [PANEL_MODEL]")
+                    help="профиль колонки: lite2, mini3pro, mini3, station2 или auto — определить по плате [PANEL_MODEL]")
     args = ap.parse_args()
     for stream in (sys.stdout, sys.stderr):   # консоль Windows: русский текст не должен ронять сервер
         try:
@@ -5532,8 +4830,7 @@ def main():
     device = normalize_device(args.device) or settings.get("device")
     if args.find:
         device = pick_device(find_adb(), args.find) or device
-    # С --open (start.bat/start.sh) не спрашиваем в консоли: страница сама найдёт колонку в сети
-    if not device and not args.open and sys.stdin and sys.stdin.isatty():
+    if not device and sys.stdin and sys.stdin.isatty():
         try:
             device = normalize_device(input("IP-адрес колонки (Enter — колонка по USB): "))
         except EOFError:
@@ -5547,8 +4844,6 @@ def main():
     model = (settings.get("model") if settings.get("model") in profiles.PROFILES else "lite2") if auto else args.model
     PanelUpdater().repair_missing()
     profiles.install(sys.modules[__name__], model, auto=auto)
-    global PANEL_PROFILE
-    PANEL_PROFILE = (model, auto)
 
     adb = Adb(find_adb(), device)
     panel = Panel(adb)
@@ -5559,19 +4854,29 @@ def main():
     panel.conn = Connection(adb)
     panel.leds = LedStream(adb)
     panel.metrics = Metrics(adb, panel.conn)
-    threading.Thread(target=panel.metrics.run, daemon=True, name="metrics").start()
-    threading.Thread(target=panel.conn.run, daemon=True, name="adb-connection").start()
-    # в режиме нескольких колонок (multi.py) профиль задан явно: перезапуск сменил бы порт процесса
-    if auto and not os.environ.get("PANEL_GATEWAY_SECRET"):
-        threading.Thread(target=watch_model, args=(adb, panel.conn, model), daemon=True, name="model").start()
     Handler.panel = panel
     Handler.access = access.PanelAccess(PANEL_AUTH_FILE)
+    import music_library
+    panel.data_dir = DATA_DIR
+    from sound_overrides import SoundOverrides
+    panel.sound_overrides = SoundOverrides(panel, sys.modules[__name__])
+    panel.library = music_library.install(sys.modules[__name__], panel)
+    from animation_library import AnimationLibrary
+    panel.animations = AnimationLibrary(panel, sys.modules[__name__])
+    if model == 'lite1':
+        panel.patterns = panel.animations.patterns
+        panel.ring_frames = panel.animations.frames
+        panel.play_pattern = lambda kind,name,seconds: panel.animations.play(name,seconds) if kind=='ring' else (_ for _ in ()).throw(ValueError('У Лайт 1 нет дисплея'))
+    from graph_scenes import GraphScenes
+    panel.scenes = GraphScenes(panel, DATA_DIR / ".panel_graph_scenes.json", JOURNAL)
+    from native_scenes import NativeScenes
+    panel.native_scenes = NativeScenes(panel, sys.modules[__name__])
     Handler.updater = PanelUpdater()
     Handler.ports = {"http": args.port}
     # после перезапуска (обновление) старый процесс может ещё держать порт — подождём
     for attempt in range(20):
         try:
-            srv = ThreadingHTTPServer((args.host, args.port), Handler)
+            srv = PanelHTTPServer((args.host, args.port), Handler)
             break
         except OSError:
             if attempt == 19:
@@ -5579,13 +4884,16 @@ def main():
             time.sleep(0.5)
     args.port = srv.server_address[1]
     Handler.ports["http"] = args.port
+    threading.Thread(target=panel.metrics.run, daemon=True, name="metrics").start()
+    threading.Thread(target=panel.conn.run, daemon=True, name="adb-connection").start()
+    # в режиме нескольких колонок (multi.py) профиль задан явно: перезапуск сменил бы порт процесса
+    if auto and not os.environ.get("PANEL_GATEWAY_SECRET"):
+        threading.Thread(target=watch_model, args=(adb, panel.conn, model), daemon=True, name="model").start()
     ready = os.environ.get("PANEL_READY_FILE")
     if ready:
         Path(ready).write_text(json.dumps({"port": args.port}), encoding="utf8")
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     print(f"Панель {VERSION} · профиль {model}{' (авто)' if auto else ''}")
-    JOURNAL.add(f"запуск панели {VERSION}: профиль {model}{' (авто)' if auto else ''}, {platform.system()} {platform.release()}, "
-                f"Python {platform.python_version()}, adb {'.'.join(map(str, adb_version(adb.adb) or ())) or '?'}")
     print(f"adb: {adb.adb}  колонка: {device or 'по USB / единственное устройство adb'}  данные: {DATA_DIR}")
     print(f"Панель: http://{shown}:{args.port}/")
     if args.https_port:

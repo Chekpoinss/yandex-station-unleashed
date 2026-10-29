@@ -85,7 +85,7 @@ class Gateway(server.Handler):
             if clean == '/ca.crt':
                 certificate = self.data_dir/'.tls/ca.crt'
                 if not certificate.exists(): return self._send(404, {'error':'HTTPS не включён'})
-                return self._send(200,certificate.read_bytes(),'application/x-x509-ca-cert',headers=[('Content-Disposition','attachment; filename="stantsiya-panel-ca.crt"')])
+                return self._send(200,certificate.read_bytes(),'application/x-x509-ca-cert')
             if self.headers.get('Upgrade','').lower()=='websocket':
                 return self.tunnel(model,path)
             self.proxy(model,path)
@@ -99,6 +99,7 @@ class Gateway(server.Handler):
     def proxy(self,model,path):
         length=int(self.headers.get('Content-Length') or 0)
         if length<0 or length>512*1024*1024:return self._send(413,{'error':'Слишком большой запрос'})
+        self._body_read=True
         body=self.rfile.read(length) if length else None
         conn=http.client.HTTPConnection('127.0.0.1',DEVICES[model]['port'],timeout=180)
         try:
@@ -214,7 +215,7 @@ def main():
     parser.add_argument('--data-dir',type=Path,default=ROOT/'data/multi')
     parser.add_argument('--host',default='127.0.0.1')
     parser.add_argument('--port',type=int,default=8765)
-    parser.add_argument('--https-port',type=int,default=8766,help='HTTPS port; certificate is generated automatically; 0 disables HTTPS')
+    parser.add_argument('--https-port',type=int,default=0)
     parser.add_argument('--allow-network',action='append',default=[],help='optional client CIDR; repeat for multiple networks')
     args=parser.parse_args()
     # Workers receive their private key in a copied environment; the gateway never uses worker mode.
@@ -232,23 +233,12 @@ def main():
         httpd=ThreadingHTTPServer((args.host,args.port),Gateway);httpd.daemon_threads=True
         Gateway.ports={'http':httpd.server_port}
         if args.https_port:
-            try:
-                certificate,key=access.ensure_certs(data_dir/'.tls')
-                context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
-                context.load_cert_chain(certificate,key)
-                for attempt in range(20):
-                    try:
-                        tls=server.TLSServer((args.host,args.https_port),Gateway,context)
-                        break
-                    except OSError:
-                        if attempt == 19: raise
-                        time.sleep(0.5)
-                tls.daemon_threads=True
-                threading.Thread(target=tls.serve_forever,daemon=True).start()
-                Gateway.ports['https']=tls.server_port
-            except (OSError,access.AccessError,ssl.SSLError) as error:
-                if tls: tls.server_close();tls=None
-                print(f'HTTPS не запущен ({error}) — панель работает по HTTP',flush=True)
+            certificate,key=access.ensure_certs(data_dir/'.tls')
+            context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.minimum_version=ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certificate,key)
+            tls=server.TLSServer((args.host,args.https_port),Gateway,context);tls.daemon_threads=True
+            Gateway.ports['https']=tls.server_port
+            threading.Thread(target=tls.serve_forever,daemon=True).start()
         print('Unified panel: http://'+args.host+':'+str(httpd.server_port),flush=True)
         if not Gateway.access.enabled:print('Set a shared panel password in Settings before exposing it to your LAN.',flush=True)
         httpd.serve_forever()

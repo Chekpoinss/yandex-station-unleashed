@@ -12,11 +12,8 @@ import managed_yam
 
 class UpdateValidation(unittest.TestCase):
     def panel(self):
-        test = self
         class Panel:
             YAM_ASSET = 'yamd-aarch64-linux-musl'
-            # релизы с yamd (с yam 0.2 «последний релиз» — уже другой менеджер, без демона)
-            def _yam_release_list(self, refresh=False): return [test.release]
             def yam_plugins(self): return []
             def _yam(self, *args): return {'updates': {'enabled': False}}
             def yam_status(self): return {'installed': True, 'running': True}
@@ -26,10 +23,11 @@ class UpdateValidation(unittest.TestCase):
         return panel
 
     def downloads(self, blob, expected):
-        self.release = {'tag_name': 'v0.1.17', 'assets': [
+        release = {'tag_name': 'v0.1.17', 'assets': [
             {'name':'SHA256SUMS','browser_download_url':'https://example/sums'},
             {'name':'yamd-aarch64-linux-musl','browser_download_url':'https://example/binary','digest':'sha256:'+expected}]}
-        return [io.BytesIO((expected+'  yamd-aarch64-linux-musl').encode()), io.BytesIO(blob)]
+        return [io.BytesIO(json.dumps(release).encode()),
+                io.BytesIO((expected+'  yamd-aarch64-linux-musl').encode()), io.BytesIO(blob)]
 
     def test_bad_sha_never_stops_or_pushes(self):
         panel = self.panel()
@@ -83,19 +81,3 @@ class UpdateValidation(unittest.TestCase):
         self.assertLess(removed, created, 'old copies go before the new one is made')
 
 if __name__ == '__main__': unittest.main()
-
-
-class YamReleaseChoice(unittest.TestCase):
-    """С yam 0.2 последний релиз — новый менеджер без yamd: панель берёт последний релиз именно с yamd."""
-
-    def test_skips_releases_without_yamd(self):
-        import server
-        rels = [{'tag_name': 'yam-v0.2.2', 'published_at': '2026-10-28T08:47:39Z', 'assets': [{'name': 'yam-aarch64-unknown-linux-musl'}]},
-                {'tag_name': 'v0.1.19', 'published_at': '2026-10-27T16:43:39Z', 'assets': [{'name': 'yamd-aarch64-linux-musl'}]},
-                {'tag_name': 'yam-v0.2.1', 'published_at': '2026-10-27T22:04:23Z', 'assets': [{'name': 'SHA256SUMS'}]},
-                {'tag_name': 'v0.1.18', 'published_at': '2026-10-20T10:00:00Z', 'assets': [{'name': 'yamd-aarch64-linux-musl'}]},
-                {'tag_name': 'v0.1.20-rc', 'prerelease': True, 'published_at': '2026-10-29T00:00:00Z', 'assets': [{'name': 'yamd-aarch64-linux-musl'}]}]
-        p = server.Panel(Mock())
-        with patch.object(server.urllib.request, 'urlopen', return_value=io.BytesIO(json.dumps(rels).encode())):
-            got = p._yam_release_list(refresh=True)
-        self.assertEqual([r['tag_name'] for r in got], ['v0.1.19', 'v0.1.18'])

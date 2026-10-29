@@ -11,9 +11,12 @@ const c={$:node,store:{get:k=>storage[k],set:(k,v)=>storage[k]=v},confirmAnswer:
 vm.createContext(c);
 vm.runInContext('let panelVer=null;'+source,c);
 (async()=>{
-  // Новая версия: плашка на «Обзоре» и строка в «Настройках», без всплывающего окна и без обновления
+  // No background checks or overview notifications in the owner's local fork.
   await vm.runInContext('loadPanelVersion()',c);
-  assert.equal(node('#ov-update').hidden,false,'overview banner shown');
+  assert.equal(requests.length,0,'no automatic upstream request');
+  assert.equal(node('#ov-update').hidden,true,'overview notifications disabled');
+  await vm.runInContext('loadPanelVersion(true)',c);
+  assert.equal(node('#ov-update').hidden,true,'manual check does not enable notifications');
   assert(node('#ov-update-text').textContent.includes('0.1.4'));
   assert.equal(node('#upd-row').hidden,false);
   assert(!requests.some(p=>p.includes('/update')),'must not update without confirmation');

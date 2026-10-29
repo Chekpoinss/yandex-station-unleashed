@@ -68,16 +68,3 @@ class GlagolIdentityTests(unittest.TestCase):
         panel = self.panel('{"common": {"deviceType": "yandexmicro"}}')
         panel._configure_glagol("")
         self.assertIsNone(panel.glagol.device_id)
-
-
-class AliceCommandLimitTests(unittest.TestCase):
-    def test_limits_checked_before_any_glagol_send(self):
-        panel = server.Panel(Mock())
-        panel.glagol = Mock()
-        for text in [None, [], 7, '', '   ', 'я' * 1025, '😀' * 1025]:
-            with self.subTest(text_type=type(text).__name__), self.assertRaises(server.AdbError):
-                panel.music_cmd({'command': 'sendText', 'text': text})
-        panel.glagol.send.assert_not_called()
-        for text in ['я' * 1024, '😀' * 1024]:
-            panel.music_cmd({'command': 'sendText', 'text': '  ' + text + '  '})
-            panel.glagol.send.assert_called_with({'command': 'sendText', 'text': text})

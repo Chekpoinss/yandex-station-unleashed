@@ -8,6 +8,10 @@ import access
 
 class OpenSSLTests(unittest.TestCase):
     def test_vpn_and_public_sans_do_not_invalidate_lan_certificate(self):
+        try:
+            access.find_openssl()
+        except access.AccessError:
+            self.skipTest('OpenSSL executable is required for real certificate verification')
         with tempfile.TemporaryDirectory() as directory:
             tls = Path(directory)
             with patch.object(access.socket,'gethostname',return_value='long-runner-hostname.' * 5), patch.object(access, 'local_names', return_value=(['localhost'], ['127.0.0.1','10.11.0.209','100.127.115.50','203.0.113.1','169.254.1.2'])):
@@ -17,6 +21,20 @@ class OpenSSLTests(unittest.TestCase):
                 previous = crt.read_bytes()
                 self.assertEqual(access.ensure_certs(tls), (crt, key))
                 self.assertEqual(crt.read_bytes(), previous)
+
+    def test_vpn_san_filter_and_subject_limit_without_external_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tls=Path(directory)
+            def fake_openssl(*args,**kwargs):
+                for flag in ('-out','-keyout'):
+                    if flag in args:Path(args[args.index(flag)+1]).write_text('test fixture')
+            with patch.object(access.socket,'gethostname',return_value='long-host.'*12), \
+                 patch.object(access,'local_names',return_value=(['localhost'],['127.0.0.1','192.168.1.2','198.18.0.1','203.0.113.4'])), \
+                 patch.object(access,'_openssl',side_effect=fake_openssl) as openssl:
+                access.ensure_certs(tls)
+            self.assertEqual((tls/'server.sans').read_text(),'DNS:localhost,IP:127.0.0.1,IP:192.168.1.2')
+            subject=next(call.args for call in openssl.call_args_list if '-subj' in call.args)
+            self.assertLessEqual(len(subject[subject.index('-subj')+1].removeprefix('/CN=')),64)
 
     def test_explicit_path_can_contain_spaces(self):
         with tempfile.TemporaryDirectory(prefix='openssl test ') as directory:

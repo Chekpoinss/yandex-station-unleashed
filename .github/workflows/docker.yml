@@ -25,11 +25,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          # старое имя (до переименования проекта) — пока тоже публикуем, чтобы у установленных через Docker
-          # продолжало обновляться
-          images: |
-            ghcr.io/${{ github.repository }}
-            ghcr.io/dimap/yandex-lite2-web
+          images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=semver,pattern={{version}}
