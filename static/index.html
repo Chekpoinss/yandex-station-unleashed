@@ -850,6 +850,7 @@
               <div class="row"><button class="btn sm primary" id="ring-set">Включить</button><button class="btn sm" id="ring-off">Выключить</button><button class="btn sm" id="ring-reset" title="Отдать кольцо Алисе: погасить цвет и остановить анимации панели">Сбросить</button></div>
             </div>
           </div>
+          <div id="room-light-effects" hidden></div>
           <div class="card-head">
             <div class="seg" id="pat-kind" role="group" aria-label="Анимации"><button data-k="ring" class="active">Кольцо</button><button data-k="clock">Часы</button></div>
             <div class="row" style="gap:6px">
@@ -2501,11 +2502,13 @@ const hex2rgb = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 let ringHex = '#6C47FF';
 function pickColor(hex) {
   ringHex = hex.toUpperCase();
+  $('#ring-color').value = ringHex;
   $('#ring-preview').style.setProperty('--ring', ringHex);
   $$('#swatches .sw').forEach(s => s.classList.toggle('sel', s.dataset.hex === ringHex));
 }
 const setRing = (btn, rgb, on) => act(btn, async () => {
-  await api('/api/ring', { red: rgb[0], green: rgb[1], blue: rgb[2] });
+  if (on && window.panelLightEffects?.supported) await window.panelLightEffects.color(rgb);
+  else await api('/api/ring', { red: rgb[0], green: rgb[1], blue: rgb[2] });
   $('#ring-preview').classList.toggle('off', !on);
   toRing([rgb, rgb, rgb]);
 });
@@ -5586,6 +5589,7 @@ import {startAsciiBackground} from './static/ascii-background.js';
 startAsciiBackground(document.querySelector('#pl-viz'), {playing:()=>!!muState()?.playing,spectrum:()=>window.__spectrum,disabled:()=>!!window.__vizOff||!plMobile(),size:1.1,alpha:.8,color:()=>plTintColor()});
 </script>
 <script src="static/panel-library.js?v=020"></script>
+<script src="static/light-effects.js?v=1"></script>
 <script src="static/panel-tools.js?v=020"></script>
 <script src="static/upstream-scenes.js?v=020"></script>
 <script src="static/upstream-assistant.js?v=020"></script>

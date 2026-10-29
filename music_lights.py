@@ -6,7 +6,78 @@ import subprocess
 import threading
 import time
 import copy
+import atexit
+import socket
+import struct
 from light_profiles import DEFAULTS, settings as validate_settings, change as change_profile
+
+
+class AmbientState:
+    """Passive Alice state, with no login, speech capture, commands or device files."""
+    def __init__(self, adb):
+        self.adb, self.port, self.stream = adb, None, None
+        self.buffer = b''
+        self.state = None
+        self.retry_at = 0.
+
+    def close(self):
+        if self.stream:
+            self.stream.close()
+        self.stream = None
+        if self.port is not None:
+            try:
+                subprocess.run(self.adb._base() + ['forward', '--remove', f'tcp:{self.port}'],
+                               capture_output=True, timeout=3,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self.port, self.state, self.buffer = None, None, b''
+
+    @staticmethod
+    def decode(body):
+        from native_alarms import fields, one
+        try:
+            outer = fields(body)
+            if outer.get(253) != [3]:
+                return None
+            state = one(fields(one(outer, 252, bytes)), 1, int)
+            return state if state in (0, 1, 2, 3) else None
+        except (ValueError, TypeError):
+            return None
+
+    def priority(self):
+        try:
+            if self.stream is None:
+                if time.monotonic() < self.retry_at:
+                    return 'disconnected'
+                self.port = self.adb.forward(9875)
+                self.stream = socket.create_connection(('127.0.0.1', self.port), timeout=2)
+                self.stream.setblocking(False)
+            for _ in range(4):
+                try:
+                    part = self.stream.recv(65536)
+                except BlockingIOError:
+                    break
+                if not part:
+                    raise ConnectionError('Alice state channel closed')
+                self.buffer += part
+                while len(self.buffer) >= 4:
+                    size = struct.unpack('<I', self.buffer[:4])[0]
+                    if not 0 < size <= 256 * 1024:
+                        raise ValueError('Invalid Alice state frame')
+                    if len(self.buffer) < size + 4:
+                        break
+                    value = self.decode(self.buffer[4:size + 4])
+                    self.buffer = self.buffer[size + 4:]
+                    if value is not None:
+                        self.state = value
+                if len(self.buffer) > 256 * 1024 + 4:
+                    raise ValueError('Alice state buffer exceeds limit')
+            return 'disconnected' if self.state is None else 'alice' if self.state else None
+        except Exception:
+            self.close()
+            self.retry_at = time.monotonic() + 2
+            return 'disconnected'
 
 
 def band_levels(raw):
@@ -90,6 +161,8 @@ class MusicLights:
             except (ValueError, TypeError):
                 pass
         self.animation = None
+        self.effect_monitor = None
+        atexit.register(self.close_effect_monitor)
         self.alarm_checked = 0.
         self.alarm_reason = None
         self.config_lock = threading.Lock()
@@ -119,6 +192,11 @@ class MusicLights:
                     'reason': self.reason,
                     'frames_sent': self.frames_sent, 'frame': self.last_frame,
                     'bass_pulse': round(self.bass.pulse, 3)}
+
+    def close_effect_monitor(self):
+        monitor, self.effect_monitor = self.effect_monitor, None
+        if monitor is not None:
+            monitor.close()
 
     def start_native_animation(self, text, seconds):
         import tempfile
@@ -155,14 +233,49 @@ class MusicLights:
 
     def animation_status(self):
         with self.lock:
+            anim = self.animation
+            effect = copy.deepcopy(anim.get('effect')) if anim else None
+            if effect is not None:
+                effect['remaining'] = max(0, anim['until'] - time.monotonic()) if anim['until'] is not None else None
             return {'supported': self.supported, 'animations': copy.deepcopy(self.animations),
-                    'playing': self.animation['name'] if self.animation else None, 'reason': self.reason}
+                    'playing': anim['name'] if anim else None, 'reason': self.reason, 'effect': effect}
+
+    def effect_tick(self, anim, now, priority=None):
+        """Return to the native writer on expiry; keep desired mode while Alice speaks."""
+        from ring_animations import effect_frame
+        if anim['until'] is not None and now >= anim['until']:
+            if not priority:
+                self.send_frame([[0, 0, 0] for _ in range(3)], animation=True)
+            self.animation = None
+            self.release()
+        elif priority:
+            self.reason = priority
+            self.release()
+        else:
+            self.send_frame(effect_frame(anim['effect'], now - anim['start']), animation=True)
 
     def animation_action(self, data):
         from ring_animations import validate_name, validate_frames
         if not self.supported:
             raise ValueError('Редактор логотипа поддерживается на Лайт 1')
         action = data.get('action')
+        if action == 'effect':
+            from ring_animations import effect_settings
+            with self.lock:
+                current = self.animation.get('effect') if self.animation else None
+                selected = effect_settings(data, current)
+            # Continuous effects and audio-reactive lighting share one worker.
+            # Selecting an effect switches off FFT; enabling FFT ends the effect.
+            if self.settings['enabled']:
+                self.configure({'enabled': False})
+            with self.lock:
+                if self.animation and self.animation.get('native'):
+                    self.animation['until'] = 0
+                    self.native_animation_tick(self.animation, 'cancelled')
+                now = time.monotonic()
+                self.animation = {'name': selected['mode'], 'effect': selected, 'start': now,
+                                  'until': now + selected['seconds'] if selected['seconds'] else None}
+            return self.animation_status()
         if action == 'stop':
             with self.lock:
                 if self.animation and self.animation.get('native'):
@@ -215,6 +328,9 @@ class MusicLights:
         with self.config_lock:
             with self.lock:
                 updated, profiles, selected = change_profile(self.settings, self.profiles, self.selected_profile, data)
+                if updated['enabled'] and self.animation and self.animation.get('effect'):
+                    self.animation = None
+                    self.release()
                 if updated['analysis'] != self.settings['analysis']:
                     self.bass = BassPulse()
                     self.levels = [0., 0., 0.]
@@ -341,7 +457,7 @@ class MusicLights:
 
     def run(self):
         while True:
-            time.sleep(.02 if self.animation else .1)
+            time.sleep(.05 if self.animation and self.animation.get('effect') else .02 if self.animation else .1)
             try:
                 with self.library.lock:
                     phase = self.library.phase
@@ -351,6 +467,15 @@ class MusicLights:
                 panel = self.library.panel
                 glagol = getattr(panel, 'glagol', None)
                 priority = self.native_priority(glagol)
+                if self.animation and self.animation.get('effect') and priority == 'disconnected':
+                    if self.effect_monitor is None:
+                        self.effect_monitor = AmbientState(panel.adb)
+                    priority = self.effect_monitor.priority()
+                    if not priority and time.monotonic() < self.yield_until:
+                        priority = 'volume'
+                elif self.effect_monitor is not None:
+                    self.effect_monitor.close()
+                    self.effect_monitor = None
                 alarm = getattr(getattr(panel, 'metrics', None), 'ringing', None)
                 with self.lock:
                     path, offset = self.file, self.offset
@@ -368,6 +493,9 @@ class MusicLights:
                 # One LED writer for FFT and custom animation. System/Alice/alarm always wins.
                 with self.lock:
                     anim = self.animation
+                    if anim and anim.get('effect'):
+                        self.effect_tick(anim, time.monotonic(), priority or ('alarm' if alarm else None))
+                        continue
                     if anim and anim.get('native'):
                         self.native_animation_tick(anim, priority or ('alarm' if alarm else None))
                         continue
