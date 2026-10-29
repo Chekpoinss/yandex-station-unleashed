@@ -1555,6 +1555,7 @@ echo @@BLUEZ
         local = self._assist_local_md5() if "installed" in flags else None
         return {"supported": True, "installed": "installed" in flags, "running": running, "config": cfg,
                 "outdated": bool(local) and local not in out,
+                "preflight": self.yam2_preflight() if "installed" not in flags else None,
                 "state": state if running else {}}
 
     def assistant_install(self):
@@ -1562,10 +1563,13 @@ echo @@BLUEZ
         if strip_ansi(arch).strip() not in ("aarch64", "arm64"):
             raise AdbError(f"ядро колонки {strip_ansi(arch).strip() or '?'}: программа помощника пока собрана "
                            "только под 64-битное (aarch64)")
-        binary = self._assist_binary()
         check = self.yam2_preflight()
         if not check['compatible']:
-            raise AdbError('Недостаточно ресурсов для помощника')
+            raise AdbError('Помощник не установлен: ' + '; '.join(check['issues']) +
+                           f". Доступно RAM: {check['available_kib'] / 1024:.1f} МБ; "
+                           f"свободно /data: {check['free_kib'] / 1024:.1f} МБ. "
+                           'Файлы на колонке не изменены.')
+        binary = self._assist_binary()
         self.adb.shell(f"mkdir -p {ASSIST_DIR}; [ ! -f {ASSISTD} ] || cp {ASSISTD} {ASSISTD}.bak.{time.time_ns()}; start-stop-daemon -K -p {ASSIST_SD} 2>/dev/null; true", check=False)
         self.adb.push(binary, ASSISTD + ".new", timeout=300)
         self.adb.shell(f"chmod 755 {ASSISTD}.new; mv {ASSISTD}.new {ASSISTD}")
@@ -2825,13 +2829,29 @@ echo @@BLUEZ
             raise AdbError("неизвестное действие")
         return {"ok": True}
 
-    def yam_status(self):
+    def _yam_root(self):
+        """Find an existing legacy install without assuming a hardware profile's layout."""
+        roots = list(dict.fromkeys((YAM_DIR, '/data/quazar/yam', '/data/local/yam')))
         out, _, _ = self.adb.shell(
-            f"[ -x {YAMD} ] && echo installed; pidof yamd >/dev/null && echo running; "
+            'for d in ' + ' '.join(shlex.quote(d) for d in roots) +
+            '; do [ ! -x "$d/bin/yamd" ] || echo "$d"; done; echo @running; '
+            'for p in $(pidof yamd); do readlink -f /proc/$p/exe; done; true', check=False)
+        installed, _, running = strip_ansi(out).replace('\r', '').partition('@running')
+        found = [d for d in installed.splitlines() if d in roots]
+        # readlink resolves /data to /bkupgrade/data on some firmware versions.
+        active = next((d for d in found if any(p.strip().endswith(d + '/bin/yamd')
+                                             for p in running.splitlines())), None)
+        return active or next(iter(found), YAM_DIR)
+
+    def yam_status(self):
+        root = self._yam_root()
+        out, _, _ = self.adb.shell(
+            f"[ -x {root}/bin/yamd ] && echo installed; pidof yamd >/dev/null && echo running; "
             f"awk '$4==\"0A\" && $2 ~ /:{YAM_PORT:04X}$/ {{f=1}} END{{if(f)print \"listening\"}}' "
             f"/proc/net/tcp /proc/net/tcp6; [ -f {YAM_AUTOSTART} ] && {hook_active()} && echo autostart; true")
         flags = set(out.split())
-        return {"installed": "installed" in flags, "running": "running" in flags and "listening" in flags,
+        running = "running" in flags and "listening" in flags
+        return {"installed": "installed" in flags or running, "running": running, "root": root,
                 "autostart": "autostart" in flags,
                 "web_url": f"http://{self.adb.serial.split(':')[0]}:{YAM_PORT}/" if self.adb.serial and ":" in self.adb.serial else None}
 
@@ -2839,12 +2859,13 @@ echo @@BLUEZ
         if not self.yam_status()["installed"]:
             raise AdbError("yam не установлен на колонке")
         # Как в docs/DEPLOYMENT.md, только через start-stop-daemon: nohup adbd всё равно прибивает.
-        self.detach("yamd", YAMD_CMD)
+        root = self._yam_root()
+        self.detach("yamd", YAMD_CMD.replace(YAM_DIR, root))
         for _ in range(20):
             time.sleep(0.5)
             if self.yam_status()["running"]:
                 return self.yam_status()
-        out, _, _ = self.adb.shell(f"tail -5 {YAM_DIR}/yamd.log", check=False)
+        out, _, _ = self.adb.shell(f"tail -5 {root}/yamd.log", check=False)
         raise AdbError("yamd не поднял порт 8099. Лог: " + out.strip()[-400:])
 
     # ---------- версия yamd ----------
@@ -2881,7 +2902,8 @@ echo @@BLUEZ
         return self._yam_sums[tag]
 
     def yam_version(self, refresh=False):
-        out, _, _ = self.adb.shell(f"[ -f {YAMD} ] && sha256sum {YAMD}; true", check=False, timeout=30)
+        binary = self._yam_root() + '/bin/yamd'
+        out, _, _ = self.adb.shell(f"[ -f {binary} ] && sha256sum {binary}; true", check=False, timeout=30)
         sha = (strip_ansi(out).split() or [None])[0]
         if not sha:
             return {"installed": None, "sha": None}
@@ -2989,7 +3011,7 @@ echo @@BLUEZ
                 f"Content-Type: application/octet-stream\r\n\r\n").encode() + blob + f"\r\n--{boundary}--\r\n".encode()
         res = self._yam("POST", "/api/plugins", body, {"Content-Type": f"multipart/form-data; boundary={boundary}"},
                         timeout=300)
-        self.adb.shell(YAM_FIX_EXEC, check=False)
+        self.adb.shell(YAM_FIX_EXEC.replace(YAM_DIR, self._yam_root()), check=False)
         return res
 
     def yam_action(self, action, pkg_id):
@@ -2999,7 +3021,7 @@ echo @@BLUEZ
                         "run": ("POST", "/invoke"), "stop": ("POST", "/stop")}[action]
         body, headers = (b"{}", {"Content-Type": "application/json"}) if action == "run" else (None, {})
         if action == "run":
-            self.adb.shell(YAM_FIX_EXEC, check=False)
+            self.adb.shell(YAM_FIX_EXEC.replace(YAM_DIR, self._yam_root()), check=False)
         try:
             self._yam(method, f"/api/plugins/{pkg_id}{path}", body, headers)
         except AdbError as e:
@@ -3101,7 +3123,7 @@ echo @@BLUEZ
         mem = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else 0
         free = int(lines[2]) if len(lines) > 2 and lines[2].isdigit() else 0
         issues = []
-        if rc or arch != 'aarch64': issues.append('требуется ядро aarch64')
+        if rc or arch not in ('aarch64', 'arm64'): issues.append('требуется ядро aarch64')
         if mem < 32768: issues.append('нужно не менее 32 МБ доступной RAM')
         if free < 32768: issues.append('нужно не менее 32 МБ свободного /data')
         issues.extend(x for x in lines if x.startswith('missing:'))
@@ -3113,11 +3135,10 @@ echo @@BLUEZ
         plat = self.yam2_platform()
         out, _, _ = self.adb.shell(f"[ -x {YAM2} ] && [ -x {YAM2_RUN} ] && sha256sum {YAM2}; true", check=False, timeout=30)
         sha = (strip_ansi(out).split() or [None])[0]
-        legacy, _, _ = self.adb.shell(f"[ -x {YAMD} ] && echo installed; pidof yamd >/dev/null && echo running; true",
-                                      check=False)
+        legacy = self.yam_status()
         host = self.adb.serial.split(":")[0] if self.adb.serial and ":" in self.adb.serial else None
         res = {"preflight": self.yam2_preflight(), "installed": bool(sha), "platform": plat, "root": YAM2_ROOT, "host": host,
-               "legacy": {"installed": "installed" in legacy, "running": "running" in legacy}}
+               "legacy": {"installed": legacy['installed'], "running": legacy['running']}}
         try:
             rels = self._yam2_releases(refresh)
             latest = rels[0] if rels else None

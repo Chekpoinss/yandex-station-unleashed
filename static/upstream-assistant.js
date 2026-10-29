@@ -15,6 +15,16 @@ async function loadAssistant(fill) {
   $('#as-experimental').hidden = !st.experimental;
   if (st.model_name) $('#as-exp-model').textContent = st.model_name.replace(/^Станция/, 'Станции');
   $('#as-missing').hidden = st.installed;
+  let installCheck = $('#as-install-check');
+  if (!installCheck) {
+    installCheck = document.createElement('p'); installCheck.id = 'as-install-check'; installCheck.className = 'hint';
+    $('#as-install').after(installCheck);
+  }
+  const preflight = st.preflight;
+  $('#as-install').disabled = !!preflight && !preflight.compatible;
+  installCheck.hidden = st.installed || !preflight;
+  installCheck.textContent = preflight ? `Свободно /data: ${(preflight.free_kib / 1024).toFixed(1)} МБ · RAM: ${(preflight.available_kib / 1024).toFixed(1)} МБ.`
+    + (preflight.compatible ? '' : ' Установка недоступна: ' + (preflight.issues || []).join('; ') + '. Освободите ресурсы и обновите страницу.') : '';
   $('#as-on').hidden = !st.installed;
   $('#as-update').hidden = !st.outdated;
   const s = st.state || {}, c = st.config || {};

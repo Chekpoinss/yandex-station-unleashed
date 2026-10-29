@@ -4226,8 +4226,8 @@ async function loadYam2(refresh) {
   $('#y2-legacy-note').hidden = !st.legacy?.running;
   // старый yam — свёрнут, если стоит новый; раскрыт, если есть только старый
   const leg = $('#yam-legacy');
-  if (!leg.dataset.touched) leg.open = !st.installed && !!st.legacy?.installed;
-  $('#yam-legacy-state').textContent = st.legacy?.installed ? (st.legacy.running ? '— работает' : '— установлен, остановлен') : '— не установлен';
+  if (!leg.dataset.touched) leg.open = !st.installed && !!(st.legacy?.installed || st.legacy?.running);
+  $('#yam-legacy-state').textContent = st.legacy?.running ? '— работает' : st.legacy?.installed ? '— установлен, остановлен' : '— не установлен';
   if (!st.installed) return;
   await Promise.all([loadYam2Packages(), loadYam2Catalog()]);
 }
@@ -4364,9 +4364,10 @@ async function loadYam() {
   let st;
   try { st = await api('/api/yam/status'); } catch (e) { return e.offline || toast(e.message, true); }
   yam.status = st;
-  $('#yam-missing').hidden = st.installed;
-  $('#yam-card').hidden = !st.installed;
-  if (!st.installed) { $('#yam-on').hidden = true; return; }
+  const present = st.installed || st.running;
+  $('#yam-missing').hidden = present;
+  $('#yam-card').hidden = !present;
+  if (!present) { $('#yam-on').hidden = true; return; }
   $('#yam-badge').textContent = st.running ? 'yamd работает' : 'yamd остановлен';
   $('#yam-badge').className = 'badge' + (st.running ? ' ok' : ' bad');
   $('#yam-start').hidden = st.running;
@@ -4377,12 +4378,14 @@ async function loadYam() {
   if (st.web_url) $('#yam-web').href = st.web_url;
   loadYamVersion();          // GitHub может отвечать долго — версию дорисуем отдельно
   if (!st.running) return;
-  const [plugins, reg, settings] = await Promise.all([
-    api('/api/yam/plugins').catch(e => (toast(e.message, true), [])),
+  const extra = Promise.all([
     api('/api/yam/registry').catch(e => (toast('Реестр: ' + e.message, true), { packages: [] })),
     api('/api/yam/settings').catch(() => null),
   ]);
-  yam.plugins = plugins; yam.registry = reg.packages || [];
+  try { yam.plugins = await api('/api/yam/plugins'); renderYam(); }
+  catch (e) { $('#yam-installed').innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  const [reg, settings] = await extra;
+  yam.registry = reg.packages || [];
   if (settings) $('#yam-binaries').checked = settings.allow_plugin_binaries;
   renderYam();
 }
