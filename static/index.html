@@ -695,6 +695,7 @@
     <nav id="nav-sheet" class="side" aria-label="Разделы">
       <a href="#overview" data-tab="overview"><svg width="20" height="20" aria-hidden="true"><use href="#i-grid"/></svg>Обзор</a>
       <a href="#player" data-tab="player"><svg width="20" height="20" aria-hidden="true"><use href="#i-music"/></svg>Плеер</a>
+      <a href="#smarthome" data-tab="smarthome"><svg width="20" height="20" aria-hidden="true"><use href="#i-grid"/></svg>Умный дом</a>
       <div class="nav-group" role="presentation">Колонка</div>
       <a href="#alarm" data-tab="alarm"><svg width="20" height="20" aria-hidden="true"><use href="#i-alarm"/></svg>Будильник</a>
       <a href="#scenes" data-tab="scenes"><svg width="20" height="20" aria-hidden="true"><use href="#i-flow"/></svg>Сценарии</a>
@@ -731,6 +732,14 @@
       <p id="cs-text"></p>
       <div class="addr" id="cs-addr"></div>
       <button class="btn" id="cs-retry" hidden>Повторить сейчас</button>
+      <button class="btn" id="cs-address-toggle" type="button" aria-expanded="false" aria-controls="cs-address-form">Поменялся адрес?</button>
+      <form id="cs-address-form" class="login" hidden>
+        <label for="cs-address">Новый IP-адрес колонки</label>
+        <input class="field mono" id="cs-address" type="text" inputmode="decimal" placeholder="192.168.1.50" autocomplete="off" required>
+        <button class="btn primary" type="submit" id="cs-address-save">Сохранить и подключиться</button>
+        <p class="hint">Адрес запомнится. Сервер панели перезапустится, колонка — нет.</p>
+        <p class="login-err" id="cs-address-error" role="alert"></p>
+      </form>
       <form class="login" id="cs-login" hidden>
         <input type="text" name="username" value="panel" autocomplete="username" hidden>
         <input type="password" class="field" id="cs-pass" autocomplete="current-password" placeholder="Пароль" aria-label="Пароль" required>
@@ -1678,6 +1687,18 @@
     </section>
   </main>
 
+  <main id="tab-smarthome" data-page hidden>
+    <header class="page-head"><div><h1>Умный дом</h1><div class="sub">Ваши устройства в Доме с Алисой</div></div><button class="btn" id="sh-refresh">Обновить</button></header>
+    <p id="sh-status" class="hint" role="status" aria-live="polite"></p>
+    <section class="card" id="sh-connect" hidden><h2>Подключите свой дом</h2><p class="hint">Войдите в тот же аккаунт Яндекса, к которому добавлены устройства. Используется общий вход панели; пароль вводится только на странице Яндекса.</p>
+      <button class="btn primary" id="sh-login">Войти по QR-коду</button><div id="sh-qr" hidden></div><p class="hint" id="sh-qr-status"></p>
+    </section>
+    <details class="card sh-auth"><summary>Подключение через отдельный OAuth-токен</summary><p class="hint">Если вход по QR недоступен, используйте токен приложения с правами iot:view и iot:control. Он сохраняется только на компьютере с панелью. <a href="https://yandex.ru/dev/dialogs/smart-home/doc/ru/concepts/platform-protocol" target="_blank" rel="noopener noreferrer">Как получить доступ</a></p>
+      <form id="sh-token-form" class="row"><input id="sh-token" class="field" type="password" autocomplete="off" placeholder="OAuth-токен умного дома" aria-label="OAuth-токен умного дома"><button class="btn" type="submit">Подключить</button><button class="btn" type="button" id="sh-token-remove" hidden>Убрать токен</button></form>
+    </details>
+    <div class="sh-filters" id="sh-filters" hidden><input id="sh-search" class="field" type="search" placeholder="Найти устройство" aria-label="Поиск устройств"><select id="sh-house" class="field" aria-label="Выбор дома"><option value="">Все дома</option></select><select id="sh-room" class="field" aria-label="Выбор комнаты"><option value="">Все комнаты</option></select></div>
+    <div id="sh-devices" class="sh-grid"></div>
+  </main>
   <!-- ================= ПРИЛОЖЕНИЯ (yam) ================= -->
   <main id="tab-apps" data-page hidden>
     <header class="page-head">
@@ -3308,7 +3329,7 @@ const store = {
   get: k => { try { return localStorage.getItem(PanelContext.storageKey(k)); } catch { return null; } },
   set: (k, v) => { try { localStorage.setItem(PanelContext.storageKey(k), v); } catch {} },
 };
-const TABS = ['overview', 'player', 'alarm', 'scenes', 'assistant', 'radio', 'charts', 'boot', 'apps', 'files', 'logs', 'console', 'settings'];
+const TABS = ['overview', 'player', 'smarthome', 'alarm', 'scenes', 'assistant', 'radio', 'charts', 'boot', 'apps', 'files', 'logs', 'console', 'settings'];
 let bootLoaded = false;
 let logsLoaded = false;
 let shownTab = null;
@@ -3349,8 +3370,9 @@ function showTab() {
   $$('nav.side a, .mbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
   mbarMore(tab);
   navSheet(false);
-  $('#conn-screen').hidden = online;
-  $$('main[data-page]').forEach(m => m.hidden = !online || m.id !== 'tab-' + tab);
+  const cloudTab = tab === 'smarthome' && connInfo?.state !== 'locked';
+  $('#conn-screen').hidden = online || cloudTab;
+  $$('main[data-page]').forEach(m => m.hidden = (!online && !cloudTab) || m.id !== 'tab-' + tab);
   // прокрутку возвращаем, когда вкладка уже показана: пока открыт плеер, страница закреплена и прокручивать некуда
   if (scrollTo) window.scrollTo({ top: scrollTo });
   if (!online) return;
@@ -5508,6 +5530,8 @@ function renderConn() {
   $('#cs-ring').className = 'conn-ring' + (ring ? ' ' + ring : '');
   $('#cs-ring').innerHTML = i.state === 'locked' ? icon('i-lock', 28) : '';
   const locked = i.state === 'locked', form = $('#cs-login');
+  $('#cs-address-toggle').hidden = locked;
+  if (locked) $('#cs-address-form').hidden = true;
   if (form.hidden === locked) { form.hidden = !locked; if (locked) setTimeout(() => $('#cs-pass').focus(), 0); }
   $('#cs-retry').hidden = !['adb_error', 'waiting'].includes(i.state);
   $('#cs-log-box').hidden = !(i.log && i.log.length);
@@ -5522,6 +5546,7 @@ function renderConn() {
 }
 async function connCheck() {
   clearTimeout(connTimer);
+  const previousConnectionState = connInfo?.state;
   try {
     const r = await PanelContext.fetch('/api/conn');
     connInfo = r.status === 401 ? { state: 'locked' } : await r.json();
@@ -5530,7 +5555,7 @@ async function connCheck() {
   const was = online;
   online = connInfo.state === 'online';
   renderConn();
-  if (online !== was) { online ? onConnected() : showTab(); updateMinibar(); }
+  if (online !== was || connInfo.state !== previousConnectionState) { online ? onConnected() : showTab(); updateMinibar(); }
   connTimer = setTimeout(connCheck, online ? 3000 : connInfo.state === 'locked' ? 10000 : 1000);
 }
 setInterval(() => connInfo?.state === 'adb_error' && renderConn(), 1000);   // обратный отсчёт
@@ -5550,6 +5575,20 @@ $('#cs-login').onsubmit = async e => {
   finally { btn.disabled = false; }
 };
 $('#cs-retry').onclick = e => act(e.currentTarget, async () => { await PanelContext.fetch('/api/conn/retry', { method: 'POST' }); await connCheck(); });
+$('#cs-address-toggle').onclick = e => {
+  const form = $('#cs-address-form'); form.hidden = !form.hidden;
+  e.currentTarget.setAttribute('aria-expanded', String(!form.hidden));
+  if (!form.hidden) $('#cs-address').focus();
+};
+$('#cs-address-form').onsubmit = async e => {
+  e.preventDefault(); const button = $('#cs-address-save'), error = $('#cs-address-error');
+  button.disabled = true; error.textContent = '';
+  try {
+    const result = await api('/api/conn/address', {address: $('#cs-address').value.trim()});
+    error.textContent = result.message;
+    setTimeout(() => location.reload(), 2200);
+  } catch (x) { error.textContent = x.message; button.disabled = false; }
+};
 
 let statusTimer;
 function onConnected() {
@@ -5590,6 +5629,7 @@ startAsciiBackground(document.querySelector('#pl-viz'), {playing:()=>!!muState()
 </script>
 <script src="static/panel-library.js?v=020"></script>
 <script src="static/light-effects.js?v=1"></script>
+<script src="static/smart-home.js?v=1"></script>
 <script src="static/panel-tools.js?v=020"></script>
 <script src="static/upstream-scenes.js?v=020"></script>
 <script src="static/upstream-assistant.js?v=020"></script>

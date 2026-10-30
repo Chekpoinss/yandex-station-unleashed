@@ -40,3 +40,6 @@ device/assistant/build/
 
 .native_scene_receipts.json
 .native_scene_receipts.tmp
+.smart_home_auth.json
+.smart_home_auth.tmp
+.panel_settings.tmp

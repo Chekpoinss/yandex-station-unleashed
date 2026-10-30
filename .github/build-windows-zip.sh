@@ -14,7 +14,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/$NAME/runtime/python" "$OUT"
 cd "$ROOT"
-cp -r server.py access.py glagol.py profiles.py managed_yam.py multi.py speakers.example.json VERSION static device start.bat LICENSE README.md CONTRIBUTION.md "$WORK/$NAME/"
+cp -r server.py access.py glagol.py profiles.py managed_yam.py multi.py speakers.example.json VERSION smart_home.py static device start.bat LICENSE README.md CONTRIBUTION.md "$WORK/$NAME/"
 cp pyadb.py alarm_intent.py alarm_music.py audio_stream.py light_profiles.py music_artwork.py music_library.py music_lights.py music_metadata.py music_spectrum.py native_alarms.py playback_order.py voice_bridge.py voice_catalog.py voice_events.py yandex_library.py panel_journal.py panel_scenes.py graph_scenes.py native_scenes.py animation_library.py ring_animations.py sound_overrides.py requirements-local.txt "$WORK/$NAME/"
 python -m pip download --only-binary=:all: --no-deps -r requirements-local.txt -d "$WORK/wheels"
 mkdir -p "$WORK/$NAME/runtime/packages"
@@ -32,3 +32,4 @@ find "$WORK/$NAME" -name '__pycache__' -type d -prune -exec rm -rf {} +
 (cd "$WORK" && zip -qr9 "$NAME.zip" "$NAME")
 mv "$WORK/$NAME.zip" "$OUT/"
 echo "$OUT/$NAME.zip"
+

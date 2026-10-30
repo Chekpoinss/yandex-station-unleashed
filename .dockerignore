@@ -34,3 +34,6 @@ animations
 speakers.json
 open-my-panel*.cmd
 device/assistant/build
+.smart_home_auth.json
+.smart_home_auth.tmp
+.panel_settings.tmp

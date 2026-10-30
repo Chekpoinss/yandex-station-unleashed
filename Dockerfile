@@ -10,6 +10,7 @@ COPY server.py access.py glagol.py profiles.py managed_yam.py multi.py speakers.
 COPY pyadb.py alarm_intent.py alarm_music.py audio_stream.py light_profiles.py music_artwork.py music_library.py music_lights.py music_metadata.py music_spectrum.py native_alarms.py playback_order.py voice_bridge.py voice_catalog.py voice_events.py yandex_library.py panel_journal.py panel_scenes.py graph_scenes.py native_scenes.py animation_library.py ring_animations.py sound_overrides.py requirements-local.txt ./
 RUN pip install --no-cache-dir -r requirements-local.txt
 COPY static ./static
+COPY smart_home.py ./
 COPY device ./device
 COPY LICENSE ./
 

@@ -1082,6 +1082,54 @@ def normalize_device(dev):
     return dev or None
 
 
+def connection_address(value):
+    """The address form accepts only an IPv4 address and an optional TCP port."""
+    if not isinstance(value, str) or not re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?', value.strip()):
+        raise ValueError('Введите IP-адрес колонки, например 192.168.1.50. Порт — по желанию.')
+    host, _, port = value.strip().partition(':')
+    try:
+        ip = ipaddress.IPv4Address(host)
+    except ipaddress.AddressValueError:
+        raise ValueError('Неверный IP-адрес') from None
+    if ip.is_unspecified or ip.is_multicast or ip.is_loopback or not 1 <= int(port or '5555') <= 65535:
+        raise ValueError('Неверный адрес или порт колонки')
+    return f'{ip}:{int(port or "5555")}'
+
+
+def initial_device(argument, settings):
+    # A previous launcher may still contain the old IP after a DHCP change.
+    return settings.get('device') if settings.get('device_from_panel') else normalize_device(argument) or settings.get('device')
+
+
+def change_connection_address(panel, value, restart):
+    address = connection_address(value)
+    library = getattr(panel, 'library', None)
+    if library is not None and getattr(library, 'phase', None) in ('playing', 'buffering'):
+        raise ValueError('Сначала остановите воспроизведение через панель: смена адреса перезапускает её сервер.')
+    scenes = getattr(panel, 'scenes', None)
+    if scenes is not None and scenes.status().get('running'):
+        raise ValueError('Сначала остановите выполняющийся сценарий.')
+    # Probe the new address before replacing a working configuration. No device writes.
+    try:
+        subprocess.run([panel.adb.adb, 'connect', address], capture_output=True, timeout=10,
+                       **_SUBPROCESS_WINDOW_OPTIONS)
+        probe = Adb(panel.adb.adb, address)
+        out, _, code = probe.shell('echo __panel_address_check__', timeout=5, check=False)
+        if code or '__panel_address_check__' not in out:
+            raise ValueError('no response')
+    except (OSError, AdbError, subprocess.TimeoutExpired, ValueError):
+        raise ValueError('Колонка по этому адресу не ответила по adb. Проверьте IP и Wi-Fi; прежний адрес сохранён.') from None
+    settings = {**load_settings(), 'device': address, 'device_from_panel': True}
+    temporary = SETTINGS_FILE.with_suffix('.tmp')
+    try:
+        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=1), encoding='utf8')
+        os.replace(temporary, SETTINGS_FILE)
+    except OSError:
+        raise ValueError('Не удалось сохранить адрес. Проверьте доступ к папке панели.') from None
+    threading.Timer(.8, restart).start()
+    return {'ok': True, 'restarting': True, 'message': 'Адрес сохранён. Панель переподключается…'}
+
+
 def strip_ansi(s):
     return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
@@ -4334,6 +4382,13 @@ class Handler(BaseHTTPRequestHandler):
                               headers=[("Content-Disposition", 'attachment; filename="stantsiya-panel-ca.crt"')])
         if u.path == "/api/conn":
             return self._send(200, self.panel.conn.info())
+        if u.path in ('/api/smart-home', '/api/smart-home/device', '/api/smart-home/qr'):
+            query = parse_qs(u.query)
+            if u.path == '/api/smart-home/qr':
+                return self._handle(self.panel.auth_qr_status)
+            if u.path == '/api/smart-home/device':
+                return self._handle(lambda: self.panel.smart_home.device(query.get('id', [''])[0]))
+            return self._handle(lambda: self.panel.smart_home.devices(query.get('refresh') == ['1']))
         if u.path == "/api/scenes":
             return self._send(200, self.panel.scenes.status())
         if u.path == "/api/logs" and not self.panel.conn.online:
@@ -4432,6 +4487,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._panel_auth_post(u.path, d)
         if u.path == "/api/conn/retry":
             return self._send(200, self.panel.conn.retry_now())
+        if u.path == '/api/conn/address':
+            data = self._json()
+            return self._handle(lambda: change_connection_address(self.panel, data.get('address'),
+                                self.updater.restart if self.updater else restart_self))
+        if u.path in ('/api/smart-home/action', '/api/smart-home/auth', '/api/smart-home/qr'):
+            data = self._json()
+            if u.path == '/api/smart-home/qr':
+                return self._handle(self.panel.auth_qr_start)
+            if u.path == '/api/smart-home/auth':
+                return self._handle(lambda: self.panel.smart_home.configure(data))
+            return self._handle(lambda: self.panel.smart_home.action(data))
         if self._offline(u.path):
             return
         p = self.panel
@@ -4569,7 +4635,7 @@ class PanelUpdater:
              "light_profiles.py", "music_artwork.py", "music_library.py", "music_lights.py", "music_metadata.py",
              "music_spectrum.py", "native_alarms.py", "playback_order.py", "voice_bridge.py", "voice_catalog.py",
              "voice_events.py", "yandex_library.py", "requirements-local.txt", "panel_journal.py",
-             "pyadb.py", "panel_scenes.py", "graph_scenes.py", "native_scenes.py", "animation_library.py", "ring_animations.py", "sound_overrides.py")
+             "pyadb.py", "panel_scenes.py", "graph_scenes.py", "native_scenes.py", "animation_library.py", "ring_animations.py", "sound_overrides.py", "smart_home.py")
     DIRS = ("static", "device")
     OBSOLETE = ("3d", "tools")  # docs/modernization contains the local validation record.
 
@@ -4848,7 +4914,7 @@ def main():
 
     # Адрес колонки: из аргумента/окружения, иначе — запомненный, иначе спросим (если есть кому ответить).
     settings = load_settings()
-    device = normalize_device(args.device) or settings.get("device")
+    device = initial_device(args.device, settings)
     if args.find:
         device = pick_device(find_adb(), args.find) or device
     if not device and sys.stdin and sys.stdin.isatty():
@@ -4869,6 +4935,8 @@ def main():
     adb = Adb(find_adb(), device)
     panel = Panel(adb)
     panel.auth = glagol.YandexAuth(AUTH_FILE)
+    from smart_home import SmartHome
+    panel.smart_home = SmartHome(panel.auth, DATA_DIR / '.smart_home_auth.json')
     host = device.rpartition(":")[0] if device and ":" in device else None
     panel.glagol = glagol.Glagol(panel.auth, host, None, GLAGOL_PLATFORM)
     panel.ymusic = glagol.YandexMusic(panel.auth)
