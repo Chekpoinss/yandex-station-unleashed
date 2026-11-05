@@ -43,6 +43,7 @@ class YandexAuth:
         self.data = json.loads(self.path.read_text()) if self.path.exists() else {}
         self.qr = None   # незавершённый вход по QR: opener с куками, заголовки, ответ submit
         self.lock = threading.Lock()
+        self.qr_session = None
 
     # ---- хранение ----
     @property
@@ -53,12 +54,14 @@ class YandexAuth:
         return {"logged_in": bool(self.music_token), "login": self.data.get("login"), "method": self.data.get("method")}
 
     def _save(self, **kw):
+        self.qr_session = None
         self.data = {k: v for k, v in kw.items() if v}
         fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(self.data, f)
 
     def logout(self):
+        self.qr_session = None
         self.data = {}
         self.path.unlink(missing_ok=True)
         return self.info()
@@ -86,17 +89,27 @@ class YandexAuth:
     def _finish(self, x_token=None, music_token=None, method=""):
         """Из x-token получаем токен Музыки, узнаём логин и сохраняем."""
         if x_token and not music_token:
-            r = json.loads(self._req(None, "https://oauth.mobile.yandex.net/1/token", data={
-                "client_id": MUSIC_CLIENT[0], "client_secret": MUSIC_CLIENT[1],
-                "grant_type": "x-token", "access_token": x_token}))
-            music_token = r.get("access_token")
-            if not music_token:
-                raise AuthError("Яндекс не выдал токен Музыки")
+            try:
+                r = json.loads(self._req(None, "https://oauth.mobile.yandex.net/1/token", data={
+                    "client_id": MUSIC_CLIENT[0], "client_secret": MUSIC_CLIENT[1],
+                    "grant_type": "x-token", "access_token": x_token}))
+                music_token = r.get("access_token")
+            except (AuthError, ValueError):
+                pass
         try:
+            if not music_token:
+                raise AuthError("Нет токена Музыки")
             login = json.loads(self._req(None, "https://login.yandex.ru/info?format=json",
                                          headers={"Authorization": f"OAuth {music_token}"})).get("login")
-        except AuthError:
-            raise AuthError("токен не подошёл — войдите ещё раз")
+        except (AuthError, ValueError):
+            if not x_token:
+                raise AuthError("токен не подошёл — войдите ещё раз") from None
+            profile = json.loads(self._req(None, "https://mobileproxy.passport.yandex.net/1/bundle/account/short_info/",
+                                           headers={"Authorization": f"OAuth {x_token}"}))
+            if profile.get("status") != "ok":
+                raise AuthError("Яндекс не подтвердил сессию. Повторите вход по QR.")
+            login = profile.get("display_login") or profile.get("login")
+            music_token = None
         self._save(music_token=music_token, x_token=x_token, login=login, method=method)
         return self.info()
 
@@ -124,24 +137,44 @@ class YandexAuth:
         with self.lock:
             q = self.qr
             if not q:
+                if self.qr_session or (self.data.get("method") == "qr" and self.data.get("x_token")):
+                    return {"state": "done", **self.info()}
                 return {"state": "none"}
             if time.time() - q["started"] > 300:
                 self.qr = None
                 return {"state": "expired"}
             r = json.loads(self._req(q["op"], "https://passport.yandex.ru/pwl-yandex/api/passport/auth/magic/code/status",
                                      json_body=q["submit"], headers=q["headers"]))
+            if r.get("status") == "error" or r.get("errors"):
+                raise AuthError("Яндекс отклонил проверку QR-кода. Создайте новый код в панели.")
             if r.get("state") != "otp_auth_finished":
                 return {"state": "waiting"}
             self._req(q["op"], "https://passport.yandex.ru/pwl-yandex/api/passport/sessions/get_session",
                       data={"track_id": r["trackId"]}, headers=q["headers"])
             cookies = "; ".join(f"{c.name}={c.value}" for c in q["jar"] if c.domain.endswith("yandex.ru"))
-            t = json.loads(self._req(None, "https://mobileproxy.passport.yandex.net/1/bundle/oauth/token_by_sessionid",
-                                     data={"client_id": PASSPORT_CLIENT[0], "client_secret": PASSPORT_CLIENT[1]},
-                                     headers={"Ya-Client-Host": "passport.yandex.ru", "Ya-Client-Cookie": cookies}))
-            self.qr = None
+            try:
+                t = json.loads(self._req(None, "https://mobileproxy.passport.yandex.net/1/bundle/oauth/token_by_sessionid",
+                                         data={"client_id": PASSPORT_CLIENT[0], "client_secret": PASSPORT_CLIENT[1]},
+                                         headers={"Ya-Client-Host": "passport.yandex.ru", "Ya-Client-Cookie": cookies}))
+            except AuthError as exc:
+                if str(exc) != "mobileproxy.passport.yandex.net: HTTP 403":
+                    raise
+                try:
+                    home = json.loads(self._req(q["op"], "https://iot.quasar.yandex.ru/m/v3/user/devices"))
+                except (AuthError, ValueError):
+                    home = {}
+                if not isinstance(home, dict) or home.get("status") != "ok":
+                    self.qr = None
+                    return {"state": "failed", "message": "Яндекс отклонил QR-вход. Используйте OAuth-токен умного дома."}
+                self._save(method="qr")
+                self.qr_session = (uuid.uuid4().hex, q["jar"])
+                self.qr = None
+                return {"state": "done", **self.info()}
             if "access_token" not in t:
                 raise AuthError("не удалось получить токен по сессии")
-            return {"state": "done", **self._finish(x_token=t["access_token"], method="qr")}
+            result = self._finish(x_token=t["access_token"], method="qr")
+            self.qr = None
+            return {"state": "done", **result}
 
     # ---- запасной вход: официальный OAuth, токен приходит в адресе страницы ----
     def oauth_finish(self, url_or_token):

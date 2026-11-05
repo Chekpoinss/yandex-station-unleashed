@@ -829,7 +829,7 @@
           <div class="card-head"><h2>Громкость</h2></div>
           <div class="vol-main">
             <div class="vol-big" id="vol-big">—</div>
-            <div><label for="vol-master" class="meta" style="font-weight:600;color:var(--text-2)">Динамик</label><input type="range" id="vol-master" min="0" max="100" step="5"></div>
+            <div><label for="vol-master" class="meta" style="font-weight:600;color:var(--text-2)">Динамик</label><input type="range" id="vol-master" min="0" max="100" step="5"><button type="button" class="btn sm" id="vol-mute" aria-pressed="false" disabled>Выключить звук</button></div>
           </div>
           <div class="chips">
             <button class="pill" data-level="10">Тихо</button><button class="pill" data-level="30">30</button>
@@ -2275,11 +2275,25 @@ setInterval(updateSub, 1000);
 
 // ---------- громкость ----------
 // Динамик — в уровнях Алисы 0–10 (как на колонке), Bluetooth — сырой микшер 0–255.
+let lastAudibleLevel = null;
 function showLevel(level) {
   $('#vol-master').value = Math.round(level);
   $('#vol-big').textContent = Math.round(level);
+  if (level > 0) lastAudibleLevel = Math.round(level);
+  const mute = $('#vol-mute');
+  mute.textContent = level === 0 ? 'Вернуть звук' : 'Выключить звук';
+  mute.setAttribute('aria-pressed', String(level === 0));
+  mute.disabled = level === 0 && lastAudibleLevel === null;
 }
 let volTimer;
+$('#vol-mute').onclick = e => act(e.currentTarget, async () => {
+  const current = Number($('#vol-master').value);
+  const level = current > 0 ? 0 : lastAudibleLevel;
+  if (level === null) return;
+  clearTimeout(volTimer);
+  await api('/api/volume', {level});
+  showLevel(level);
+});
 for (const [id, key] of [['#vol-master', 'level'], ['#vol-bt', 'bt']]) {
   const el = $(id);
   el.addEventListener('input', () => {
@@ -5629,7 +5643,7 @@ startAsciiBackground(document.querySelector('#pl-viz'), {playing:()=>!!muState()
 </script>
 <script src="static/panel-library.js?v=020"></script>
 <script src="static/light-effects.js?v=1"></script>
-<script src="static/smart-home.js?v=1"></script>
+<script src="static/smart-home.js?v=4"></script>
 <script src="static/panel-tools.js?v=020"></script>
 <script src="static/upstream-scenes.js?v=020"></script>
 <script src="static/upstream-assistant.js?v=020"></script>

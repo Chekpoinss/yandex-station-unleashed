@@ -51,6 +51,9 @@ class SmartHome:
     def _credential(self):
         if self.token:
             return 'official', self.token
+        session = getattr(self.auth, 'qr_session', None)
+        if session:
+            return 'qr_session', session[0]
         token = self.auth.data.get('x_token')
         if token:
             return 'qr', token
@@ -112,9 +115,9 @@ class SmartHome:
     def _session(self, kind, token):
         if self.opener is not None:
             return
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()), NoRedirect())
-        if kind == 'official':
+        jar = self.auth.qr_session[1] if kind == 'qr_session' else http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar), NoRedirect())
+        if kind in ('official', 'qr_session'):
             return
         try:
             result = self._json('https://mobileproxy.passport.yandex.net/1/bundle/auth/x_token/', 'POST',
@@ -186,11 +189,12 @@ class SmartHome:
             try:
                 data = self._request('GET', 'user/info')
                 self._same_account(identity)
-                if not isinstance(data.get('households' if kind == 'qr' else 'devices'), list):
+                web_session = kind in ('qr', 'qr_session')
+                if not isinstance(data.get('households' if web_session else 'devices'), list):
                     raise HomeError('Яндекс вернул другой формат списка устройств. Обновите страницу или войдите заново.')
                 rooms = {r['id']: r.get('name', '') for r in data.get('rooms', []) if isinstance(r, dict) and 'id' in r}
                 devices = []
-                if kind == 'qr':
+                if web_session:
                     for home in data.get('households', []):
                         for room in home.get('rooms', []):
                             rooms[room['id']] = room.get('name', '')

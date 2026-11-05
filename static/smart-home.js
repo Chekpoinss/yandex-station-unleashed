@@ -95,7 +95,9 @@
   function filterOptions() {
     for (const [id, key, title] of [['sh-house', 'household', 'Все дома'], ['sh-room', 'room', 'Все комнаты']]) {
       const select = node(id), current = select.value;
-      select.innerHTML = `<option value="">${title}</option>` + [...new Set(devices.map(d => d[key]))].sort().map(v => `<option value="${escape(v)}">${escape(v)}</option>`).join('');
+      const house = node('sh-house').value;
+      const choices = key === 'room' && house ? devices.filter(d => d.household === house) : devices;
+      select.innerHTML = `<option value="">${title}</option>` + [...new Set(choices.map(d => d[key]))].sort().map(v => `<option value="${escape(v)}">${escape(v)}</option>`).join('');
       if ([...select.options].some(o => o.value === current)) select.value = current;
     }
   }
@@ -104,7 +106,7 @@
     reading.add(id); const at = generation;
     try {
       const value = await api('/api/smart-home/device?id=' + encodeURIComponent(id));
-      if (at !== generation) return;
+      if (at !== generation || busy.has(id)) return;
       devices = devices.map(d => d.id === id ? value : d); detailed.add(id); render();
       const card = [...root.querySelectorAll('.sh-device')].find(c => c.dataset.shId === id);
       if (card && !descriptors(value).length && !readings(value)) card.querySelector('.sh-device-status').textContent = 'Устройство не передаёт поддерживаемые панелью функции.';
@@ -140,10 +142,11 @@
     if (!root.hidden) {
       if (!document.activeElement?.closest('.sh-device')) load();
       timer = setTimeout(poll, 15000);
-    } else { clearTimeout(qrTimer); }
+    }
   }
   node('sh-refresh').onclick = () => load(true);
-  node('sh-search').oninput = render; node('sh-room').onchange = render; node('sh-house').onchange = render;
+  node('sh-search').oninput = render; node('sh-room').onchange = render;
+  node('sh-house').onchange = () => { filterOptions(); render(); };
   node('sh-token-form').onsubmit = async e => {
     e.preventDefault(); const token = node('sh-token').value; node('sh-token').value = '';
     try { await api('/api/smart-home/auth', {token}); generation++; devices = []; detailed.clear(); render(); await load(true); }
@@ -159,19 +162,22 @@
     try {
       const result = await api('/api/smart-home/qr', {}), url = new URL(result.link);
       if (url.protocol !== 'https:' || !['passport.yandex.ru', 'passport.yandex.com'].includes(url.hostname)) throw new Error('Яндекс вернул неожиданную ссылку входа.');
-      const code = qrcode(0, 'M'); code.addData(url.href); code.make();
-      node('sh-qr').innerHTML = code.createSvgTag({cellSize: 4, margin: 2, scalable: true});
+      const code = qrcode(0, 'M'); code.addData(result.link); code.make();
+      node('sh-qr').innerHTML = code.createSvgTag({cellSize: 4, margin: 16, scalable: true});
       const link = document.createElement('a'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Открыть вход на этом устройстве';
       node('sh-qr').append(link); node('sh-qr').hidden = false;
-      node('sh-qr-status').textContent = 'Отсканируйте код телефоном и подтвердите вход в Яндекс.';
+      node('sh-qr-status').textContent = 'Откройте сканер в приложении «Яндекс — с Алисой» или «Яндекс Старт» с нужным аккаунтом и подтвердите вход. Панель ждёт подтверждения.';
       async function check() {
-        if (root.hidden) return;
         try {
           const state = await api('/api/smart-home/qr');
           if (state.state === 'done') { node('sh-qr').hidden = true; await load(true); return; }
+          if (state.state === 'failed') { node('sh-qr').hidden = true; node('sh-qr-status').textContent = state.message; return; }
           if (state.state === 'expired' || state.state === 'none') { node('sh-qr-status').textContent = 'Код истёк. Нажмите «Войти по QR-коду» ещё раз.'; return; }
           qrTimer = setTimeout(check, 2000);
-        } catch (e) { node('sh-qr-status').textContent = e.message; }
+        } catch (e) {
+          node('sh-qr-status').textContent = e.message + ' Повторяем проверку входа…';
+          qrTimer = setTimeout(check, 4000);
+        }
       }
       qrTimer = setTimeout(check, 2000);
     } catch (e) { node('sh-qr-status').textContent = e.message; }

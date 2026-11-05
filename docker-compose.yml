@@ -10,4 +10,5 @@ services:
       # PANEL_HTTPS_PORT: "8766"    # 0 — без HTTPS
     volumes:
       - ./data:/data
+      - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped

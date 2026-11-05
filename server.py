@@ -624,14 +624,6 @@ class Connection:
             return "", "adb get-state: таймаут"
         return p.stdout.decode().strip(), p.stderr.decode().strip()
 
-    def _reachable(self):
-        host, _, port = self.adb.serial.rpartition(":")
-        try:
-            socket.create_connection((host, int(port)), timeout=1.5).close()
-            return True
-        except OSError:
-            return False
-
     def _alive(self):
         """adb get-state верит в старое TCP-соединение: после резкого выключения колонки он ещё долго
         отвечает «device». Поэтому проверяем по-настоящему — короткой командой на колонке."""
@@ -658,11 +650,7 @@ class Connection:
         network = bool(self.adb.serial and ":" in self.adb.serial)
         while True:
             state, err = self._adb_state()
-            if state == "device" and network and not self._reachable():
-                self.note(f"{self.adb.serial} пропала из сети", "warn")
-                self._drop()
-                state = ""
-            elif state == "device" and not self._alive():
+            if state == "device" and not self._alive():
                 self.note("adb числит колонку подключённой, но она не отвечает — сбрасываем соединение", "warn")
                 self._drop()
                 state = ""
@@ -673,10 +661,9 @@ class Connection:
                 self._set("online")
                 self._sleep(3)
                 continue
-            if not network or not self._reachable():
+            if not network:
                 if self.state != "waiting":
-                    self.note(f"{self.adb.serial} не отвечает по сети" if network
-                              else f"Устройство не найдено: {err or state}", "warn")
+                    self.note(f"Устройство не найдено: {err or state}", "warn")
                 self.attempts = 0
                 self._set("waiting")
                 self._sleep(3)
@@ -2698,6 +2685,15 @@ echo @@BLUEZ
     @staticmethod
     def _pc_tz():
         """Часовой пояс этого компьютера: колонка живёт в UTC, а время будильника — местное."""
+        if os.name == "nt":
+            from datetime import datetime
+            import struct
+            offset = int(datetime.now().astimezone().utcoffset().total_seconds())
+            minutes = abs(offset) // 60
+            name = f"UTC{'+' if offset >= 0 else '-'}{minutes // 60:02d}:{minutes % 60:02d}"
+            abbreviation = name.encode("ascii") + b"\0"
+            header = b"TZif" + b"\0" * 16 + struct.pack(">6I", 0, 0, 0, 0, 1, len(abbreviation))
+            return name, header + struct.pack(">lBB", offset, 0, 0) + abbreviation
         lt = Path("/etc/localtime")
         try:
             real = lt.resolve()
@@ -3640,8 +3636,9 @@ echo @@BLUEZ
         return self.auth.qr_start()
 
     def auth_qr_status(self):
+        previous_token = self.auth.music_token
         r = self.auth.qr_status()
-        if r.get("state") == "done":
+        if r.get("state") == "done" and self.auth.music_token != previous_token:
             self.glagol.reconnect()
         return r
 
