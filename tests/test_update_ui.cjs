@@ -1,5 +1,11 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');
 const html=fs.readFileSync(path.join(__dirname,'../static/index.html'),'utf8');
+// A syntax error anywhere in the main shell prevents connection handling and
+// every widget from starting; extracting individual functions misses this.
+for(const match of html.matchAll(/<script([^>]*)>([\s\S]*?)<\/script>/g)){
+  if(/src=|type=["'](?:module|importmap)/.test(match[1])||!match[2].trim())continue;
+  new vm.Script(match[2],{filename:'static/index.html',lineOffset:html.slice(0,match.index).split('\n').length-1});
+}
 const source=html.slice(html.indexOf('async function loadPanelVersion'),html.indexOf('\nloadPanelVersion().catch'));
 const elements={},storage={},requests=[];
 const node=id=>elements[id]||=( {style:{},hidden:true,classList:{toggle(){}},setAttribute(){}} );
@@ -39,4 +45,51 @@ vm.runInContext('let panelVer=null;'+source,c);
   assert.equal(node('#upd-check').textContent,'Проверить');assert(c.toastText.includes('последняя'));
   assert(node('#upd-state').textContent.includes('проверено'));
   console.log('Update banner, dismissal, explicit confirmation, version wait, error and refresh feedback cases passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
+
+// An unavailable model volume must not be displayed as zero or enable an unknown scale.
+const volumeNodes={};
+const volumeContext={$:id=>volumeNodes[id]||=( {} )};
+vm.createContext(volumeContext);
+const volumeStart=html.indexOf('function showLevel(');
+vm.runInContext(html.slice(volumeStart,html.indexOf('\n}',volumeStart)+2),volumeContext);
+for(const value of [null,undefined,NaN]){
+  volumeContext.value=value;vm.runInContext('showLevel(value)',volumeContext);
+  assert.equal(volumeNodes['#vol-big'].textContent,'—');
+  assert.equal(volumeNodes['#vol-master'].disabled,true);
+}
+for(const value of [0,40]){
+  volumeContext.value=value;vm.runInContext('showLevel(value)',volumeContext);
+  assert.equal(volumeNodes['#vol-big'].textContent,value);
+  assert.equal(volumeNodes['#vol-master'].disabled,false);
+}
+console.log('Unknown volume, zero volume and reconnected scale cases passed');
+
+(async()=>{
+  const start=html.indexOf('function btOutUse(');
+  const end=html.indexOf("$('#bt-out-toggle')",start);
+  // Extract just the function; the following toggle handler is outside its contract.
+  const btSource=html.slice(start,html.indexOf('\n}',start)+2);
+  for(const fail of [false,true]){
+    let finish;
+    const pending=new Promise((resolve,reject)=>{finish=()=>fail?reject(new Error('connection failed')):resolve({restarted:false});});
+    const ctx={store:{get:()=>true,set(){}},mu:{},toast(){},confirm:()=>true,
+      api:()=>pending,renderBt(){},aliceRestarting(){},
+      act:async(_b,fn)=>{try{return await fn();}catch{return null;}}};
+    vm.createContext(ctx);vm.runInContext(btSource,ctx);
+    const button={textContent:'Играть через неё'};
+    const result=ctx.btOutUse(button,'00:11:22:33:44:55');
+    assert.equal(button.textContent,'Подключение и настройка…');
+    finish();await result;
+    assert.equal(button.textContent,'Играть через неё');
+  }
+  const hookNodes={};
+  const ctx={$:id=>hookNodes[id]||=( {hidden:false,textContent:'',append(){}} ),
+    hookInfo:{broken:true,possible:false,hook:false,users:['ассистент'],supported:false,reason:'Модель не поддерживает хук'}};
+  vm.createContext(ctx);
+  vm.runInContext(html.slice(html.indexOf('function renderHook()'),html.indexOf("$('#hook-repair').onclick")),ctx);
+  ctx.renderHook();
+  assert.equal(hookNodes['#hook-repair'].hidden,true);
+  assert.equal(hookNodes['#hook-warn-text'].textContent,ctx.hookInfo.reason);
+  console.log('Bluetooth preparation feedback and unsupported hook controls passed');
 })().catch(e=>{console.error(e);process.exitCode=1});

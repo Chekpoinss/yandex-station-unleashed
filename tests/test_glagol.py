@@ -1,9 +1,12 @@
 import json
+import ssl
 import subprocess
 import unittest
+import urllib.error
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import glagol
 import server
 
 
@@ -27,7 +30,7 @@ class GlagolIdentityTests(unittest.TestCase):
             "cat /system/vendor/quasar/quasar.cfg 2>/dev/null", check=False)
 
     def test_other_firmware_platforms_are_not_replaced_with_lite(self):
-        for platform in ("plum", "pickle", "yandexmidi", "bergamot", "yandexmini_2"):
+        for platform in ("plum", "pickle", "yandexmidi", "bergamot", "yandexmini_2", "cucumber"):
             with self.subTest(platform=platform):
                 panel = self.panel(json.dumps({"common": {"deviceType": platform}}))
                 panel._configure_glagol("test-device")
@@ -68,3 +71,28 @@ class GlagolIdentityTests(unittest.TestCase):
         panel = self.panel('{"common": {"deviceType": "yandexmicro"}}')
         panel._configure_glagol("")
         self.assertIsNone(panel.glagol.device_id)
+
+
+class GlagolTokenTests(unittest.TestCase):
+    def test_certificate_error_is_explained(self):
+        g = glagol.Glagol.__new__(glagol.Glagol)
+        g.device_id, g.platform = "id", "plum"
+        g.auth = SimpleNamespace(music_token="token")
+        err = urllib.error.URLError(ssl.SSLCertVerificationError("bad cert"))
+        with patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(glagol.AuthError) as cm:
+                g._conversation_token()
+        self.assertIn("сертификат", str(cm.exception))
+
+
+class AliceCommandLimitTests(unittest.TestCase):
+    def test_limits_checked_before_any_glagol_send(self):
+        panel = server.Panel(Mock())
+        panel.glagol = Mock()
+        for text in [None, [], 7, '', '   ', 'я' * 1025, '😀' * 1025]:
+            with self.subTest(text_type=type(text).__name__), self.assertRaises(server.AdbError):
+                panel.music_cmd({'command': 'sendText', 'text': text})
+        panel.glagol.send.assert_not_called()
+        for text in ['я' * 1024, '😀' * 1024]:
+            panel.music_cmd({'command': 'sendText', 'text': '  ' + text + '  '})
+            panel.glagol.send.assert_called_with({'command': 'sendText', 'text': text})

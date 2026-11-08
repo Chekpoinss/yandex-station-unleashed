@@ -1,5 +1,8 @@
 .git
 .github
+!.github/
+.github/*
+!.github/setup-zig.sh
 __pycache__
 *.pyc
 .yandex_auth.json
@@ -37,3 +40,15 @@ device/assistant/build
 .smart_home_auth.json
 .smart_home_auth.tmp
 .panel_settings.tmp
+
+.model_colors.json
+.model-colors-*
+
+# Authentication stores and interrupted atomic writes
+.yandex_auth.*
+.panel_auth.*
+.smart_home_auth.*
+.zvuk_auth.*
+.agent.json*
+.panel_settings.*
+.zvuk-cache/

@@ -1,8 +1,17 @@
 # секреты и данные панели — никогда не коммитить
 .yandex_auth.json
+.zvuk-cache/
+.zvuk_auth.json
 .panel_auth.json
 .panel_settings.json
+.agent.json
 .metrics.json
+.midi_tests.json
+.midi_tests-*
+.midi-clock-reference*
+.radio_alice.json
+.radio_logos
+.radio_checks.json
 .tls/
 data/
 speakers.json
@@ -43,3 +52,29 @@ device/assistant/build/
 .smart_home_auth.json
 .smart_home_auth.tmp
 .panel_settings.tmp
+# сборка помощника для колонки (панель собирает её сама, если есть Go)
+device/assistant/build/
+.assistantd-*
+device/agent/build/
+device/viz/build/
+.yapanel-agent-*
+
+# локальные настройки Command Code
+.commandcode/
+.panel_journal.jsonl
+
+.model_colors.json
+.model-colors-*
+
+# ARM32 ALSA capture library
+device/mic-tap/build/
+.mic-tap-*
+
+# Authentication stores and interrupted atomic writes
+.yandex_auth.*
+.panel_auth.*
+.smart_home_auth.*
+.zvuk_auth.*
+.agent.json*
+.panel_settings.*
+.zvuk-cache/

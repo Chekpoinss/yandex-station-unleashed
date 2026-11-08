@@ -4,6 +4,12 @@ const source=await readFile(new URL('../static/renderer-profile.js',import.meta.
 const {rendererProfile}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 const original={id:'lite2',name:'Lite 2',clock:true,boot:true};
 const cases=[
+  [{hardware_model:'yandex,cucumber\0amlogic,a5',hostname:'renamed'},'midi'],
+  [{hardware_model:'Yandex Cucumber',hostname:'Yandex-Station-gen2'},'midi'],
+  [{hardware_model:'yandex,yandexmidi',hostname:'Yandex-Station-Midi-demo'},'station2'],
+  [{hostname:'Yandex-Station-Midi-demo'},'midi'],
+  [{hardware_model:'Yandex Station Midi (cucumber)',hostname:'renamed'},'midi'],
+  [{hardware_model:'yandex,cucumberish',hostname:'renamed'},'lite2'],
   [{hostname:'Yandex-Mini3-6CAK'},'mini3'],
   [{hostname:'Yandex-Mini-gen3-6CAK'},'mini3'],
   [{hostname:'Yandex-Mini3-Pro-H6QK'},'mini3pro'],
@@ -17,7 +23,12 @@ const cases=[
   [{hardware_model:'yandex,station-micro',hostname:'renamed'},'lite'],
   [{hostname:'yandex-station-lite'},'lite'],
   [{hardware_model:'Yandex Plum EVT2',hostname:'yandex-station-lite'},'lite2'],
-  [{hostname:'Yandex-Mini2-1234'},'lite2'],
+  [{hardware_model:'Yandex Prune EVT2',hostname:'renamed'},'lite2nc'],
+  [{hardware_model:'yandex,station-midi',hostname:'renamed'},'station2'],
+  [{hardware_model:'Yandex Station Midi',hostname:'renamed'},'station2'],
+  [{hostname:'Yandex-Mini2-2ZTR'},'mini2'],
+  [{hardware_model:'Yandex Station Mini 2',hostname:'renamed'},'mini2'],
+  [{hostname:'Yandex-Mini1-1234'},'lite2'],
 ];
 for(const [identity,expected]of cases){
   const result=rendererProfile(original,identity);
@@ -25,10 +36,20 @@ for(const [identity,expected]of cases){
   assert.equal(result.clock,true);assert.equal(result.boot,true); // Detection never enables hardware writes.
 }
 assert.equal(rendererProfile({id:'station2',name:'Station 2'},{hostname:'renamed'}).id,'station2');
+assert.equal(rendererProfile({...original,id:'mini2nc',clock:false},{hardware_model:'Yandex Station Mini 2',hostname:'renamed'}).id,'mini2nc');
 assert.deepEqual(original,{id:'lite2',name:'Lite 2',clock:true,boot:true});
-// Resolve the actual renderer dependency graph without any browser import map.
-// This reproduces Firefox's failure on a bare `three` import, including addons.
-assert.equal(typeof (await import('../static/model-studio.js')).createModel,'function');
-assert.equal(typeof (await import('../static/vendor/three/STLLoader.js')).STLLoader,'function');
-assert.equal(typeof (await import('../static/vendor/three/BufferGeometryUtils.js')).toCreasedNormals,'function');
-console.log(`${cases.length+1} renderer identity cases passed; hardware profile unchanged`);
+// Node needs a file-backed fetch for the model palette introduced in 0.3.0.
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = async (input, options) => {
+  const url = new URL(input);
+  if (url.protocol === 'file:') return new Response(await readFile(url));
+  return nativeFetch(input, options);
+};
+try {
+  assert.equal(typeof (await import('../static/model-studio.js')).createModel, 'function');
+  assert.equal(typeof (await import('../static/vendor/three/STLLoader.js')).STLLoader, 'function');
+  assert.equal(typeof (await import('../static/vendor/three/BufferGeometryUtils.js')).toCreasedNormals, 'function');
+} finally {
+  globalThis.fetch = nativeFetch;
+}
+console.log(`${cases.length + 1} renderer identity cases passed; hardware profile unchanged`);

@@ -1,14 +1,18 @@
 services:
   panel:
-    build: .
-    container_name: yandex-station-web
+    image: ghcr.io/dimap/yapanel-web:latest
+    # или собрать самому из исходников:
+    # build: .
+    container_name: yapanel-web
     # host — чтобы сертификат HTTPS выписался на адрес сервера в локальной сети
     network_mode: host
     environment:
       ADB_SERIAL: "192.168.1.50"   # IP колонки (порт 5555 подставится сам)
       # PANEL_PORT: "8765"
       # PANEL_HTTPS_PORT: "8766"    # 0 — без HTTPS
+      # ZVUK_SRC_PORT: "8767"       # порт раздачи треков «Звука» для колонки
     volumes:
       - ./data:/data
+      # Расписания используют часовой пояс сервера, а не UTC контейнера.
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped

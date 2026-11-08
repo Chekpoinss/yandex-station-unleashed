@@ -22,13 +22,32 @@ class PanelMusicAdapterTests(unittest.TestCase):
             'repeat': False, 'repeat_mode': 'None', 'shuffle': False, 'error': None})
         self.original_music = Mock(return_value={'auth': {'logged_in': False}, 'glagol': {'state': None}})
         self.original_cmd = Mock(return_value={'status': 'SUCCESS'})
+        self.original_provider = Mock(return_value={'provider': 'zvuk'})
         self.panel = SimpleNamespace(music=self.original_music, music_cmd=self.original_cmd,
+            music_provider=self.original_provider,
             music_info=Mock(), music_queue=Mock(), music_like=Mock(), music_dislike=Mock(),
             music_play=Mock(), music_lyrics=Mock(), status=Mock(return_value={'vol_level': 70}),
             set_volume=Mock(return_value={'ok': True}), conn=SimpleNamespace(online=True),
             auth=SimpleNamespace(info=lambda: {'logged_in': False}),
             ymusic=SimpleNamespace(lyrics_by_name=Mock(return_value={'text': 'Lyrics'})))
         bind_panel_music(self.panel, self.library)
+
+    def test_switching_streaming_provider_releases_local_playback(self):
+        def switch(provider):
+            self.assertFalse(self.library.active)
+            self.assertEqual(provider, 'zvuk')
+            return {'provider': provider}
+        self.original_provider.side_effect = switch
+        self.assertEqual(self.panel.music_provider('zvuk'), {'provider': 'zvuk'})
+        self.library.action.assert_called_once_with({'action': 'stop'})
+        self.assertEqual(self.library.data['music_source'], 'yandex')
+        self.library.save.assert_called_once()
+
+    def test_reading_provider_keeps_local_playback(self):
+        self.panel.music_provider()
+        self.assertTrue(self.library.active)
+        self.library.action.assert_not_called()
+        self.library.save.assert_not_called()
 
     def test_stock_music_contract_without_faking_yandex_login(self):
         result = self.panel.music()

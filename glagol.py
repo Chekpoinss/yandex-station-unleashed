@@ -302,6 +302,12 @@ class Glagol:
             if e.code in (401, 403):
                 raise AuthError("Яндекс не принял токен — войдите заново")
             raise AuthError(f"quasar.yandex.net: HTTP {e.code}")
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", e)
+            if isinstance(reason, ssl.SSLError):
+                raise AuthError("контейнер не доверяет сертификату quasar.yandex.net — проверьте сертификаты "
+                                "и прокси (SSL_CERT_FILE, HTTPS_PROXY)") from None
+            raise AuthError(f"quasar.yandex.net: {reason}") from None
         if resp.get("status") != "ok":
             raise AuthError(f"quasar.yandex.net: {resp}")
         return resp["token"]
@@ -374,10 +380,41 @@ class Glagol:
         finally:
             self.waiters.pop(rid, None)
 
+    def audio_play(self, url, title="", subtitle="", offset_ms=0, set_pause=False, timeout=6):
+        """Станции отдаётся ссылка на поток: играет её штатный плеер, Алиса остаётся живой."""
+        return self.send({"command": "externalCommandBypass",
+                          "data": audio_play_data(url, title, subtitle, offset_ms, set_pause)},
+                         timeout=timeout)
+
     def reconnect(self):
         if self.ws:
             self.ws.close()
         self.wake.set()
+
+
+def _pb_string(out, field, value):
+    out.append((field << 3) | 2)
+    data = value.encode()
+    n = len(data)
+    while n >= 0x80:
+        out.append((n & 0x7f) | 0x80)
+        n >>= 7
+    out.append(n)
+    out.extend(data)
+
+
+def audio_play_data(url, title="", subtitle="", offset_ms=0, set_pause=False):
+    """protobuf {1:"audio_play", 2: JSON{stream:{...},set_pause}} → base64 (как в zvukd)."""
+    stream = {"url": url, "format": "MP3", "type": "Track", "offset_ms": int(offset_ms)}
+    if title:
+        stream["title"] = title
+    if subtitle:
+        stream["subtitle"] = subtitle
+    payload = json.dumps({"stream": stream, "set_pause": bool(set_pause)}, ensure_ascii=False)
+    raw = bytearray()
+    _pb_string(raw, 1, "audio_play")
+    _pb_string(raw, 2, payload)
+    return base64.b64encode(bytes(raw)).decode()
 
 
 class YandexMusic:
@@ -468,7 +505,7 @@ class YandexMusic:
         """LRCLIB (lrclib.net) — открытая база текстов, часто с привязкой ко времени. Без ключей."""
         def get(path, **q):
             url = "https://lrclib.net/api" + path + "?" + urllib.parse.urlencode(q)
-            req = urllib.request.Request(url, headers={"User-Agent": "yandex-station-web (local panel)"})
+            req = urllib.request.Request(url, headers={"User-Agent": "yapanel-web (local panel)"})
             try:
                 with urllib.request.urlopen(req, timeout=12) as r:
                     return json.load(r)

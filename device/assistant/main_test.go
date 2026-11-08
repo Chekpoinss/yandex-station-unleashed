@@ -1,11 +1,77 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestVoiceError(t *testing.T) {
+	// Английский текст провайдера не читаем: по частым причинам — понятная фраза, для остального — про панель.
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{errors.New("модель вернула пустой ответ"), "Модель вернула пустой ответ. Попробуйте спросить ещё раз."},
+		{errors.New("не задан адрес API"), "Не задан адрес АПИ ассистента. Укажите его в веб-панели."},
+		{errors.New("не задана модель"), "Не выбрана модель ассистента. Укажите её в веб-панели."},
+		{errors.New("неверный адрес прокси"), "Неверный адрес прокси. Проверьте его в веб-панели."},
+		{errors.New("API ответил 401: Incorrect API key provided: sk-AbC123456789"), "Ключ АПИ не подошёл. Проверьте ключ в веб-панели."},
+		{errors.New("API ответил 403: Forbidden"), "Ключ АПИ не подошёл. Проверьте ключ в веб-панели."},
+		{errors.New("API ответил 404: model not found"), "Адрес АПИ или модель не найдены. Проверьте настройки в веб-панели."},
+		{errors.New("API ответил 429: rate limit"), "Сервер ассистента просит подождать: слишком много запросов. Попробуйте позже."},
+		{errors.New("API ответил 503: upstream error"), "Сервер ассистента ответил ошибкой. Попробуйте позже."},
+		{errors.New("API ответил 418: teapot"), "Ассистент отклонил запрос. Подробности — в веб-панели."},
+		{errors.New("непонятный ответ API"), "Ассистент вернул непонятный ответ. Подробности — в веб-панели."},
+		{&url.Error{Op: "Post", URL: "https://api.example.com", Err: errors.New("dial tcp: no route to host")},
+			"Нет связи с сервером ассистента. Проверьте интернет и адрес АПИ в веб-панели."},
+		{&url.Error{Op: "Post", URL: "https://api.example.com", Err: timeoutErr{}},
+			"Ассистент не ответил вовремя. Попробуйте ещё раз."},
+		{errors.New("что-то совсем странное"), genericError},
+	}
+	for _, c := range cases {
+		if got := voiceError(c.err); got != c.want {
+			t.Errorf("%v → %q, want %q", c.err, got, c.want)
+		}
+	}
+}
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
+func TestChatRejectsEmptyAnswer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"   \n"}}]}`)
+	}))
+	defer srv.Close()
+	_, err := chat(context.Background(), LLM{BaseURL: srv.URL, Model: "test"}, []message{{"user", "привет"}})
+	if err == nil || !strings.Contains(err.Error(), "пустой") {
+		t.Fatalf("пустой ответ модели должен быть ошибкой: %v", err)
+	}
+}
+
+func TestSpeechRejectsNonWAV(t *testing.T) {
+	// Так выглядит недоступный голос ассистента в speak(): текст вернулся не WAV — читаем голосом Алисы.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "это не wav")
+	}))
+	defer srv.Close()
+	if _, err := speech(context.Background(), TTS{BaseURL: srv.URL, Model: "tts", Voice: "alloy"}, "", "привет"); err == nil {
+		t.Fatal("не-WAV должен давать ошибку — по ней speak переходит на Алису")
+	}
+}
 
 func TestMatchTrigger(t *testing.T) {
 	triggers := defaults().Triggers
@@ -206,5 +272,19 @@ func TestFindScene(t *testing.T) {
 	}
 	if sc, ok := findScene(conf, "в будни", mon); !ok || sc.name != "Будни" {
 		t.Errorf("%+v %v", sc, ok)
+	}
+}
+
+func TestLoadConfigEmptyFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(" \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadConfig(p)
+	if err != nil {
+		t.Fatalf("пустой конфиг не должен быть ошибкой: %v", err)
+	}
+	if len(c.Triggers) == 0 || c.Mode.TimeoutMin != 10 {
+		t.Fatal("для пустого конфига не подставились defaults")
 	}
 }

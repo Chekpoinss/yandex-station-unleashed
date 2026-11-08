@@ -876,6 +876,19 @@ def bind_panel_music(panel, library):
                     'state': {'playing': connected and state['phase'] == 'playing', 'volume': volume[0],
                               'playerState': player}}}
 
+    original_provider = getattr(panel, 'music_provider', None)
+    if original_provider:
+        def music_provider(provider=None):
+            if provider is not None and provider in ('yandex', 'zvuk'):
+                if library.active:
+                    library.action({'action': 'stop'})
+                    with library.lock:
+                        library.active = False
+                        library.data['music_source'] = 'yandex'
+                        library.save()
+            return original_provider(provider)
+        panel.music_provider = music_provider
+
     def music_cmd(data):
         command = data.get('command')
         if command == 'source':
@@ -974,7 +987,7 @@ def bind_panel_music(panel, library):
         library.active = False
         return original['music_play'](ident, kind)
 
-    def music_lyrics(ident):
+    def music_lyrics(ident, *metadata):
         t = track(ident)
         if t:
             local = t.get('_lyrics')
@@ -983,7 +996,7 @@ def bind_panel_music(panel, library):
             if local:
                 return local
             return panel.ymusic.lyrics_by_name(t['title'], t['artist'], t.get('album'), t.get('duration', 0))
-        return original['music_lyrics'](ident)
+        return original['music_lyrics'](ident, *metadata)
 
     for name, method in (('music', music), ('music_cmd', music_cmd), ('music_info', music_info),
                          ('music_queue', music_queue), ('music_like', music_like),

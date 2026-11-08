@@ -3,8 +3,9 @@
   document.querySelector('#say-form').onsubmit = e => {
     e.preventDefault();
     const text = document.querySelector('#say-text').value.trim();
-    if (text) act(e.submitter, () => api('/api/say', {text}), 'Запрос речи отправлен Алисе');
+    if (text) act(e.submitter, () => api('/api/say', {text, voice: document.querySelector('#say-voice').value}), 'Запрос речи отправлен Алисе');
   };
+  document.querySelector('#say-voice').onchange = e => { store.set('say.voice', e.target.value); document.querySelector('#say-hint').textContent = SAY_HINT[e.target.value]; };
 })();
 document.querySelectorAll('[data-report]').forEach(b => b.onclick = () => act(b, async () => {
   const box=document.getElementById(b.dataset.report);
