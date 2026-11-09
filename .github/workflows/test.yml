@@ -53,6 +53,7 @@ jobs:
             node "$test"
           done
       - name: Device daemons
+        if: runner.os == 'Linux'
         run: |
           go -C device/assistant test ./...
           go -C device/agent test ./...
