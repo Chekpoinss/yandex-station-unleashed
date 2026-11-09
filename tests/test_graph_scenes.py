@@ -84,7 +84,7 @@ class GraphTests(unittest.TestCase):
         prefix=Path('device/alarmd.sh').read_text('utf8').split('\necho idle > $STATE\n')[0]
         script=prefix+'\nD='+shlex.quote(root.as_posix())+'\nSCENES="$D/scenes.conf"\nSRUN="$D/run."\nLOG="$D/log"\n'
         # Only substitute the hardware speech operation; run the real graph and repeat code.
-        script+='alice() { printf "%s\\n" "$1" >> "$D/spoken"; }\nslog() { :; }\nrun_scene abc\nwait\n'
+        script+='alice() { printf "%s\\n" "$1" >> "$D/spoken"; }\nslog() { :; }\nrun_scene_worker abc\n'
         env=dict(os.environ);env['PATH']=str(Path(shell).parent)+os.pathsep+env.get('PATH','')
         result=subprocess.run([shell,'-s'],input=script.encode(),capture_output=True,env=env,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'))
@@ -102,9 +102,11 @@ class GraphTests(unittest.TestCase):
         # The bundled Git tools omit sleep.exe. Supply only that external tool;
         # leave the daemon's real signal traps, wait and interpreter unchanged.
         (root/'sleep').write_text('#!/bin/sh\nexec '+shlex.quote(Path(sys.executable).as_posix())+' -c '+shlex.quote('import sys,time; time.sleep(float(sys.argv[1]))')+' "$1"\n','utf8')
-        script+='alice() { echo unexpected > "$D/spoken"; }\nslog() { :; }\nrun_scene abc\nsleep 0.2\nkill "$(cat "${SRUN}abc")"\nwait\n'
+        script=script.replace('if [ \"$1\" = --scene ]; then run_scene_worker \"$2\"; exit $?; fi', '')
+        script += 'alice() { echo unexpected > "$D/spoken"; }\nslog() { :; }\nif [ "$1" = --scene ]; then run_scene_worker "$2"; exit $?; fi\nrun_scene abc\nsleep 0.2\nkill -- -"$(cat "${SRUN}abc")"\nwait\n'
         env=dict(os.environ);env['PATH']=str(root)+os.pathsep+str(Path(shell).parent)+os.pathsep+env.get('PATH','')
-        result=subprocess.run([shell,'-s'],input=script.encode(),capture_output=True,env=env,timeout=5)
+        fixture=root/'scene-daemon.sh';fixture.write_text(script,encoding='utf8')
+        result=subprocess.run([shell,str(fixture)],capture_output=True,env=env,timeout=5)
         self.assertEqual(result.returncode,0,result.stderr.decode(errors='replace'));self.assertFalse((root/'spoken').exists(),result.stderr.decode(errors='replace'))
 
 if __name__=='__main__':unittest.main()

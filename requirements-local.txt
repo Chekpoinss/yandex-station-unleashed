@@ -1,4 +1,6 @@
-# Dependencies already used by this local fork; no ML stack is required.
-mutagen==1.48.1
-yt-dlp==2026.10.26
+# Python 3.9 retains its last compatible clients; newer interpreters use current clients.
+mutagen==1.47.0; python_version < "3.10"
+mutagen==1.48.1; python_version >= "3.10"
+yt-dlp==2025.08.27; python_version < "3.10"
+yt-dlp==2026.10.26; python_version >= "3.10"
 tzdata==2026.5

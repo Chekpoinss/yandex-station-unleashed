@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,7 +84,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(s.LED_PREFIX, 'micro')
         self.assertEqual(s.detect_model(SimpleNamespace(shell=lambda *a, **k: ('yandex,station-micro amlogic,axg', '', 0))),
                          ('lite1', 'station-micro'))
-        self.assertEqual(set(profiles.PROFILES['lite']['tested']), {'alarm', 'sounds', 'say', 'assistant'})   # #43: ассистент подтверждён
+        self.assertEqual(set(profiles.PROFILES['lite']['tested']), {'alarm', 'sounds', 'say', 'assistant', 'anims'})   # #43: ассистент подтверждён
 
     def test_model_detection_covers_prune_station_midi_and_no_clock_mini2(self):
         s = fresh_server()
@@ -211,11 +212,14 @@ class ProfileTests(unittest.TestCase):
             s.Handler.do_POST = Mock()
             original = s.Handler.do_POST
             profiles.install(s, model)
-            for path in ('/api/clock/boot', '/api/boot/install', '/api/alarms/set', '/api/backup/restore', '/api/footprint/reset'):
+            for path in ('/api/clock/boot', '/api/backup/restore', '/api/footprint/reset'):
                 request = SimpleNamespace(path=path, _guard=lambda _:False, _send=Mock())
                 s.Handler.do_POST(request)
                 self.assertEqual(request._send.call_args.args[0], 400)
             original.assert_not_called()
+            request = SimpleNamespace(path='/api/alarms', _guard=lambda _:False, _send=Mock())
+            s.Handler.do_POST(request)
+            original.assert_called_once_with(request)
 
 
 class ConfigTests(unittest.TestCase):

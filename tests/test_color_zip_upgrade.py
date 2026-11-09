@@ -1,5 +1,6 @@
 """Start the new server after a legacy ZIP updater omitted model_colors.py."""
 import shutil
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -21,14 +22,22 @@ class ColorZipUpgrade(unittest.TestCase):
             # A local release archive supplies the missing module and palette.
             with zipfile.ZipFile(root / 'release.zip', 'w') as archive:
                 for name in ('server.py', 'model_colors.py', 'static/model-colors.json'):
-                    archive.write(ROOT / name, 'release/' + name)
+                    archive.write(ROOT / name, 'yandex-station-unleashed-' + (ROOT/'VERSION').read_text().strip() + '/' + name)
             code = '''
 import io, sys
 from pathlib import Path
 from unittest.mock import patch
-import server, profiles
-assert server.model_colors is None
 blob = Path('release.zip').read_bytes()
+def fake_download(request, **kwargs):
+    assert '/Chekpoinss/yandex-station-unleashed/' in request.full_url
+    if request.full_url.endswith('SHA256SUMS'):
+        import hashlib
+        return io.BytesIO((hashlib.sha256(blob).hexdigest() + '  yandex-station-unleashed-' + Path('VERSION').read_text().strip() + '.zip\\n').encode())
+    return io.BytesIO(blob)
+import urllib.request
+urllib.request.urlopen = fake_download
+import server, profiles
+assert server.model_colors is not None
 def profiles_ready(*args, **kwargs):
     assert server.model_colors.palette('mini3pro')['green']
     raise StopIteration('profiles ready')

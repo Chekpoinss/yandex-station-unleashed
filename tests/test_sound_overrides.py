@@ -1,4 +1,6 @@
 import hashlib
+import subprocess
+import shlex
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -67,9 +69,48 @@ class SayTests(unittest.TestCase):
         panel.say(text)
         self.assertEqual(pushed,['Повтори за мной: '+text+'\n'])
         self.assertNotIn(text,panel.detach.call_args.args[1])
-        with self.assertRaises(server.AdbError):panel.say('hello',voice='assistant')
+        panel.assistant_command = Mock(return_value={'ok': True})
+        panel.say('hello',voice='assistant')
+        panel.assistant_command.assert_called_once_with({'say':'hello'})
     def test_empty_and_long_text_never_touch_device(self):
         panel=server.Panel(Mock())
         for text in ('',' '*3,'a'*301):
             with self.assertRaises(server.AdbError):panel.say(text)
         panel.adb.push.assert_not_called()
+
+class BootOverrideTests(unittest.TestCase):
+    def test_record_restores_only_matching_original_and_allowed_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            web, quasar = root/'web', root/'quasar'
+            folder = web/'animation-overrides';folder.mkdir(parents=True)
+            target = quasar/'ledpatterns'/'answer.led';target.parent.mkdir(parents=True)
+            base = folder/'test'
+            target.write_bytes(b'original')
+            base.with_suffix('.custom').write_bytes(b'custom')
+            base.with_suffix('.target').write_text(str(target)+'\n')
+            base.with_suffix('.sha256').write_text(hashlib.sha256(b'original').hexdigest()+'\n')
+            line = next(x for x in server.BOOT_HOOK_SCRIPT.splitlines() if x.startswith('for d in '))
+            line = line.replace(server.WEB_DIR, str(web)).replace(server.QUASAR, str(quasar))
+            script = 'bind() { cp "$1" "$2"; }; '+line+'; true'
+            subprocess.run(['sh','-c',script],check=True)
+            self.assertEqual(target.read_bytes(),b'custom')
+            target.write_bytes(b'new firmware')
+            subprocess.run(['sh','-c',script],check=True)
+            self.assertEqual(target.read_bytes(),b'new firmware')
+            outside = root/'foreign';outside.write_bytes(b'original')
+            base.with_suffix('.target').write_text(str(outside)+'\n')
+            subprocess.run(['sh','-c',script],check=True)
+            self.assertEqual(outside.read_bytes(),b'original')
+
+    def test_boot_record_publishes_target_after_checksum(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td);remote=root/'remote';remote.mkdir()
+            panel=SimpleNamespace(data_dir=root,adb=Mock(serial='test'),sounds=lambda:['common/test.opus'])
+            panel.adb.shell.side_effect=lambda cmd,**kw: (subprocess.run(['sh','-c',cmd],capture_output=True,text=True).stdout,'',0)
+            overrides=SoundOverrides(panel,server);overrides.remote=str(remote)
+            record={'original_sha256':hashlib.sha256(b'original').hexdigest()}
+            overrides.boot_record('common/test.opus',record)
+            target,base,_=overrides.paths('common/test.opus')
+            self.assertEqual(Path(base+'.target').read_text(),target+'\n')
+            self.assertEqual(Path(base+'.sha256').read_text(),record['original_sha256']+'\n')

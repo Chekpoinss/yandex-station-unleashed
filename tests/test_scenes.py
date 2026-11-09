@@ -128,7 +128,20 @@ class SceneInterpreter(unittest.TestCase):
                  'alice() { echo "alice $*" >> $T; }; aplay() { echo "aplay $*" >> $T; }; sleep() { :; }\n'
                  'playing() { return 1; }; online() { return 0; }; get_alsa() { echo 100; }; set_alsa() { :; }\n'
                  'alsa_of() { echo 50; }; ring() { :; }; ring_release() { n=blue:ring3; t=x; }; od() { echo 50; }\n')
-        subprocess.run([sh, "-c", stubs + part + '\nrun_scene_worker s1'], check=True, timeout=20)
+        # The daemon delegates query/music nodes to the PC through request files.
+        # Model that controller, while executing the real graph and loop limits.
+        controller = r'''
+scene_sleep() {
+    for bridge_req in "$SRUN"*.request; do
+        [ -f "$bridge_req" ] || continue
+        IFS='|' read -r bridge_sid bridge_kind bridge_arg bridge_extra bridge_nonce < "$bridge_req"
+        printf 'alice %s\n' "$bridge_arg" >> "$T"
+        printf '0\n' > "$bridge_req.result"
+        rm -f "$bridge_req"
+    done
+}
+'''
+        subprocess.run([sh, "-c", stubs + part + controller + '\nrun_scene_worker s1'], check=True, timeout=20)
         return (d / "trace").read_text().splitlines() if (d / "trace").exists() else []
 
     def test_repeat_and_if(self):

@@ -53,6 +53,7 @@ class UpdateLifecycle(unittest.TestCase):
 class YamServices(unittest.TestCase):
     def test_service_fallback_and_unrelated_errors(self):
         panel = server.Panel(Mock())
+        panel._yam_root = Mock(return_value=server.YAM_DIR)
         panel._yam = Mock(side_effect=[server.AdbError('package launch mode does not support this command'), {}])
         panel.yam_action('run','example')
         self.assertEqual(panel._yam.call_args.args,('POST','/api/plugins/example/service/start'))
@@ -60,3 +61,21 @@ class YamServices(unittest.TestCase):
         with self.assertRaisesRegex(server.AdbError,'permission denied'):
             panel.yam_action('run','example')
         self.assertEqual(panel._yam.call_count,1)
+
+class LocalYamProxy(unittest.TestCase):
+    def test_adb_forward_never_uses_system_proxy(self):
+        import os, threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Content-Type','application/json');self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+        http=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+        thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        try:
+            p=server.Panel(Mock());p._yam_port=http.server_port
+            with patch.dict(os.environ,{'http_proxy':'http://127.0.0.1:1','HTTP_PROXY':'http://127.0.0.1:1','no_proxy':'','NO_PROXY':''}):
+                self.assertEqual(p._yam('GET','/api/plugins'),{'ok':True})
+        finally:
+            http.shutdown();http.server_close();thread.join()

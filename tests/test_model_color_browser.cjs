@@ -13,7 +13,7 @@ const urlReady = new Promise((resolve,reject)=>{
 });
 (async()=>{
  const url = await urlReady;
- const browser = await chromium.launch({headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
+ const browser = await chromium.launch({executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined,headless:true,args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
  const contexts=[];const cases=[];
  const configure = async(data={})=>{const r=await fetch(url+'/__test__/configure',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});assert(r.ok);};
  const newPage = async(options={})=>{const c=await browser.newContext(options);contexts.push(c);return c.newPage();};

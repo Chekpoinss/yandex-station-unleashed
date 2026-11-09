@@ -26,6 +26,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements-local.txt
       - run: python -m compileall -q server.py model_colors.py zvuk.py zvuk_queries.py zvuk_player.py profiles.py midi.py managed_yam.py multi.py tools/midi_readonly.py
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
       - run: python -m unittest discover -s tests -v
       - run: python server.py --help
       - run: python multi.py --help
@@ -35,7 +38,42 @@ jobs:
           sh -n device/mic-tap/manage.sh
           sh -n device/mic-tap/build.sh
           sh -n .github/setup-zig.sh
-      - run: node tests/test_renderer.mjs
-      - run: node tests/test_paths.mjs
-      - run: node tests/test_catalog.cjs
-      - run: node tests/test_update_ui.cjs
+      - name: JavaScript regressions
+        run: |
+          set -e
+          for test in tests/*.cjs tests/*.mjs; do
+            case "$test" in *test_model_color_browser*) continue;; esac
+            node "$test"
+          done
+      - name: Device daemons
+        run: |
+          go -C device/assistant test ./...
+          go -C device/agent test ./...
+          go -C device/viz test ./...
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r requirements-local.txt
+      - run: npm install --no-save playwright
+      - run: npx playwright install --with-deps chromium
+      - run: node tests/test_model_color_browser.cjs
+
+  windows-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+      - run: python -m pip install -r requirements-local.txt
+      - run: python -m compileall -q .
+      - run: python server.py --help
+      - run: python multi.py --help

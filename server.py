@@ -39,8 +39,71 @@ import urllib.error
 import urllib.request
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 
+SOURCE_REPO = "Chekpoinss/yandex-station-unleashed"
+UPSTREAM_REPO = "dimap/yapanel-web"
+
+
+def verified_source_files(version):
+    """Read only this fork's checksummed release; validate before writing files."""
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:-[A-Za-z0-9.-]+)?", version):
+        raise ValueError("Неверная версия архива панели")
+    name = SOURCE_REPO.split('/')[-1]
+    request = lambda url: urllib.request.Request(url, headers={"User-Agent": "webpanel"})
+    with urllib.request.urlopen(request(f"https://github.com/{SOURCE_REPO}/archive/refs/tags/v{version}.zip"), timeout=120) as response:
+        blob = response.read(64 * 1024 * 1024 + 1)
+    if len(blob) > 64 * 1024 * 1024:
+        raise ValueError("Архив панели слишком велик")
+    with urllib.request.urlopen(request(f"https://github.com/{SOURCE_REPO}/releases/download/v{version}/SHA256SUMS"), timeout=30) as response:
+        sums = response.read(1024 * 1024).decode('utf8', 'replace')
+    names = {f'{name}-{version}.zip', f'v{version}.zip'}
+    expected = next((line.split()[0].lower() for line in sums.splitlines()
+                     if len(line.split()) == 2 and line.split()[-1].lstrip('*') in names), '')
+    if not re.fullmatch('[0-9a-f]{64}', expected) or hashlib.sha256(blob).hexdigest() != expected:
+        raise ValueError("Контрольная сумма архива панели не совпала с SHA256SUMS")
+    result = {}
+    prefix = f'{name}-{version}/'
+    with zipfile.ZipFile(io.BytesIO(blob)) as archive:
+        if sum(i.file_size for i in archive.infolist()) > 128 * 1024 * 1024:
+            raise ValueError("Распакованный архив панели слишком велик")
+        for info in archive.infolist():
+            if not info.filename.startswith(prefix):
+                raise ValueError("Архив не соответствует репозиторию и версии форка")
+            relative = info.filename[len(prefix):]
+            if not relative or info.is_dir():
+                continue
+            if '\\' in relative or relative.startswith('/') or '..' in relative.split('/') or stat.S_ISLNK(info.external_attr >> 16):
+                raise ValueError("Небезопасный путь в архиве панели")
+            if relative in result:
+                raise ValueError("Повторяющийся файл в архиве панели")
+            result[relative] = archive.read(info)
+    if 'server.py' not in result:
+        raise ValueError("В архиве панели нет server.py")
+    return result
+
+
+def _recover_legacy_update_modules():
+    root = Path(__file__).resolve().parent
+    missing = [n for n in ('zvuk.py', 'zvuk_player.py', 'zvuk_queries.py', 'model_colors.py', 'static/model-colors.json') if not (root / n).is_file()]
+    if not missing or (root / '.git').exists():
+        return
+    try:
+        files = verified_source_files((root / 'VERSION').read_text(encoding='utf8').strip())
+        if any(name not in files for name in missing):
+            raise ValueError("В архиве форка не хватает модулей")
+        for name in missing:
+            temporary = root / (name + '.recover')
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_bytes(files[name])
+            os.replace(temporary, root / name)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+        raise RuntimeError("Не удалось восстановить файлы из проверенного релиза форка: " + str(exc)) from exc
+
+
+_recover_legacy_update_modules()
+
 # Keep ADB and other helper processes invisible when launched by pythonw on Windows.
 _SUBPROCESS_WINDOW_OPTIONS = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
 
 
 import access
@@ -65,7 +128,7 @@ def load_model_colors():
         model_colors = importlib.import_module("model_colors")
     return model_colors
 
-UPSTREAM_VERSION = "0.3.0"
+UPSTREAM_VERSION = "0.3.1"
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 MIME = {".json": "application/json; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".html": "text/html; charset=utf-8",
@@ -145,7 +208,7 @@ try:
     VERSION = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
 except OSError:
     VERSION = "0.0.0"
-REPO = "dimap/yapanel-web"
+REPO = SOURCE_REPO
 LED_PREFIX = "plum"
 CLOCK_PATH = None
 
@@ -579,13 +642,24 @@ BOOT_HOOK_SCRIPT = (
     "# Веб-панель: своя заставка и звук запуска. Вызывается из rootkeeper.sh до того, как Quasar\n"
     "# их загрузит; подменяет стандартные файлы через bind mount (/system только для чтения).\n"
     f"[ -f {BOOT_ALWAYS} ] && rm -f {NO_BOOT_SOUND}\n"
-    "bind() { [ -f \"$1\" ] && [ -f \"$2\" ] && ! grep -q \" $2 \" /proc/mounts && mount --bind \"$1\" \"$2\"; }\n"
+    "rm -f /tmp/webpanel_hook_anims\n"
+    'bind() { [ -f "$1" ] && [ -f "$2" ] && ! grep -q " $2 " /proc/mounts && '
+    'mount --bind "$1" "$2" && { case "$2" in '
+    f'{QUASAR}/ledpatterns/*) touch /tmp/webpanel_hook_anims;; esac; }}; }}\n'
     f"bind {BOOT_CUSTOM} {BOOT_TARGET}\n"
     f"bind {SOUND_CUSTOM} {SOUND_TARGET}\n"
     f"bind {HOSTS_CUSTOM} {HOSTS_TARGET}\n"
-    # очередь аналитики — через минуту и в фоне: телеметрия стартует первой, и launcher ждёт её,
-    # прежде чем запустить основной maind; адреса уже закрыты, так что за минуту ничего не уйдёт
-    f"[ -f {HOSTS_CUSTOM} ] && ( sleep 60; {ANALYTICS_PURGE} ) >/dev/null 2>&1 &\n"
+    f"[ -d {OVR_DIR} ] && (cd {OVR_DIR} && find . -type f) | while read -r f; do "
+    f"bind \"{OVR_DIR}/${{f#./}}\" \"{QUASAR}/${{f#./}}\"; done\n"
+    f"for d in {WEB_DIR}/sound-overrides {WEB_DIR}/animation-overrides; do "
+    'for record in "$d"/*.target; do [ -f "$record" ] || continue; base=${record%.target}; '
+    'read -r target < "$record"; '
+    f'case "$target" in {QUASAR}/sounds/*|{QUASAR}/ledpatterns/*) '
+    'hash=$(sha256sum "$target" 2>/dev/null); expected=$(cat "$base.sha256" 2>/dev/null); '
+    '[ -n "$expected" ] && [ "${hash%% *}" = "$expected" ] && bind "$base.custom" "$target";; esac; '
+    'done; done\n'
+    # Очередь аналитики при загрузке не чистим: для этого телеметрию приходится убивать kill -9, а в первую
+    # минуту после старта это совпало с зависанием звука у Алисы. Адреса закрыты — очередь и так не уйдёт.
     # yamd сам после загрузки не стартует; start-stop-daemon -b — чтобы не держать rootkeeper.sh
     f"[ -f {YAM_AUTOSTART} ] && [ -x {YAMD} ] && ! pidof yamd >/dev/null && "
     f"start-stop-daemon -S -b -m -p /tmp/webpanel_yamd.sd -x /bin/sh -- -c {shlex.quote(YAMD_CMD)}\n"
@@ -627,7 +701,8 @@ BOOT_MOUNTS = "/proc/mounts"
 
 def initd_hook_script():
     return (f"#!/bin/sh\n{HOOK_MARK} — автозапуск веб-панели (rootkeeper.sh нет)\n"
-            f"[ \"$1\" = start ] || exit 0\n[ -x {BOOT_HOOK} ] && {BOOT_HOOK}\nexit 0\n")
+            f"[ \"$1\" = start ] || exit 0\n[ -x {BOOT_HOOK} ] && {BOOT_HOOK}\n"
+            f"[ -f /tmp/webpanel_hook_anims ] && {QUASAR}/q restart >/tmp/webpanel_hook_restart.log 2>&1\nexit 0\n")
 
 
 # /etc/init.d лежит на корне, который у колонки в рантайме только для чтения: свои S99z* туда в своё время
@@ -646,8 +721,11 @@ def with_root_rw(script):
 
 def initd_write():
     """sh: положить свой сценарий автозапуска в init.d (чужие файлы и свой свежий не трогаем)."""
-    return (f"grep -q '{HOOK_MARK}' {INITD_HOOK} 2>/dev/null || "
-            f"{{ printf '%s' {shlex.quote(initd_hook_script())} > {INITD_HOOK} && chmod 755 {INITD_HOOK}; }} || exit 4")
+    content = shlex.quote(initd_hook_script())
+    return (f"if [ -e {INITD_HOOK} ] || [ -L {INITD_HOOK} ]; then "
+            f"[ ! -L {INITD_HOOK} ] && grep -q '{HOOK_MARK}' {INITD_HOOK} || exit 4; fi; "
+            f"printf '%s' {content} | cmp -s - {INITD_HOOK} 2>/dev/null || "
+            f"{{ printf '%s' {content} > {INITD_HOOK} && chmod 755 {INITD_HOOK}; }} || exit 4")
 
 
 def initd_writable():
@@ -2680,10 +2758,19 @@ echo @@BLUEZ
                 # The explicit repair action may install init.d on a read-only
                 # root. An uncalled rootkeeper file is still not a valid route.
                 route = "initd"
+        if remount and route is None:
+            _, _, rc = self.adb.shell(rootkeeper_called(), check=False)
+            route = "rootkeeper" if rc == 0 else "initd"
         with tempfile.TemporaryDirectory() as td:
             write_unix(Path(td) / "hook", BOOT_HOOK_SCRIPT)
             self.adb.shell(f"mkdir -p {WEB_DIR}")
             self.adb.push(Path(td) / "hook", BOOT_HOOK)
+        if remount and route == "initd":
+            # Old adbd limits shell command length; keep init.d repair separate.
+            _, err, rc = self.adb.shell(f"chmod 755 {BOOT_HOOK}; " + with_root_rw(initd_write()), check=False)
+            if rc:
+                raise AdbError(err.strip() or "не удалось подключить хук к загрузке")
+            return
         remount_branch = f"elif {with_root_rw(initd_write())}; then :; " if remount else ""
         keeper_test = (f"[ {shlex.quote(route)} = rootkeeper ]" if route else
                        rootkeeper_called())
@@ -2718,6 +2805,7 @@ echo @@BLUEZ
         return ("; ".join(f"[ -f {path} ] && echo {shlex.quote('@' + name)}" for name, path in self.HOOK_USERS)
                 + f"; find {OVR_DIR}/sounds -type f 2>/dev/null | grep -q . && echo '@свои звуки'"
                 + f"; find {OVR_DIR}/ledpatterns -type f 2>/dev/null | grep -q . && echo '@свои анимации'"
+                + f"; find {WEB_DIR}/sound-overrides {WEB_DIR}/animation-overrides -name '*.target' -type f 2>/dev/null | grep -q . && echo '@подмены звуков и анимаций'"
                 + f"; find {YAM2_SVC_DIR}/boot -type f 2>/dev/null | grep -q . && echo '@автозапуск служб yam'")
 
     def hook_status(self):
@@ -2946,7 +3034,7 @@ echo @@BLUEZ
         raise AdbError(f"нет программы {what} для колонки: она скачивается с релиза GitHub — проверьте интернет")
 
     def _release_download(self, asset, dest, name):
-        base = f"https://github.com/{REPO}/releases/download/v{UPSTREAM_VERSION}/"
+        base = f"https://github.com/{UPSTREAM_REPO}/releases/download/v{UPSTREAM_VERSION}/"
         get = lambda n, limit: urllib.request.urlopen(urllib.request.Request(
             base + n, headers={"User-Agent": f"yapanel-web/{VERSION}"}), timeout=60).read(limit)
         sums = get("SHA256SUMS", 64 * 1024).decode("utf-8", "replace")
@@ -4221,7 +4309,9 @@ echo @@BLUEZ
             f"grep -q ' {BOOT_TARGET} ' /proc/mounts && {{ umount {BOOT_TARGET} || umount -l {BOOT_TARGET}; }}; "
             f"grep -q ' {SOUND_TARGET} ' /proc/mounts && {{ umount {SOUND_TARGET} || umount -l {SOUND_TARGET}; }}; "
             f"grep -q ' {HOSTS_TARGET} ' /proc/mounts && {{ umount {HOSTS_TARGET} || umount -l {HOSTS_TARGET}; }}; "
-            f"[ -f {ROOTKEEPER} ] && sed -i '/{HOOK_MARK}/d' {ROOTKEEPER}; true", check=False)
+            f"[ -d {OVR_DIR} ] && (cd {OVR_DIR} && find . -type f) | while read -r f; do t=\"{QUASAR}/${{f#./}}\"; "
+            f"grep -q \" $t \" /proc/mounts && {{ umount \"$t\" || umount -l \"$t\"; }}; done; "
+            f"{hook_drop()}; true", check=False)
         # Копию rootkeeper.sh удаляем, только если без нашей строки файл совпал с ней: значит, других правок не было.
         out, _, _ = self.adb.shell(
             f"b={ROOTKEEPER}.webpanel.bak; if [ -f $b ]; then "
@@ -5117,7 +5207,7 @@ echo @@BLUEZ
             req = urllib.request.Request(f"http://127.0.0.1:{self._yam_port}{path}", data=body,
                                          method=method, headers=headers or {})
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as r:
+                with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
                     data = r.read()
                     ctype = r.headers.get("Content-Type", "")
                     return json.loads(data) if "json" in ctype and data else data.decode("utf-8", "replace")
@@ -5865,6 +5955,18 @@ echo @@BLUEZ
         self._need_login()
         return self.ymusic.like(tid, on)
 
+    def music_liked(self):
+        self._need_login()
+        return self.ymusic.liked_tracks()
+
+    def music_album(self, aid):
+        self._need_login()
+        return self.ymusic.album_tracks(aid)
+
+    def music_playlists(self):
+        self._need_login()
+        return self.ymusic.playlists()
+
     def music_dislike(self, tid):
         self._need_login()
         r = self.ymusic.dislike(tid)
@@ -5872,10 +5974,19 @@ echo @@BLUEZ
             self.glagol.send({"command": "next"})
         return r
 
-    def music_play(self, item_id, kind):
+    def music_play(self, item_id, kind, index=None, extra=None):
+        if kind == "likes":
+            return self.glagol.send({"command": "sendText", "text": "Играй любимое"})
         if kind not in ("track", "album", "playlist", "artist"):
             raise AdbError("неизвестный тип")
-        return self.glagol.send({"command": "playMusic", "id": str(item_id), "type": kind})
+        payload = {"command": "playMusic", "id": str(item_id), "type": kind}
+        if index is not None:
+            payload["index"] = int(index)
+        if isinstance(extra, dict):
+            for k in ("playlistId", "startIndex", "startTrackId", "trackId", "context"):
+                if k in extra:
+                    payload[k] = extra[k]
+        return self.glagol.send(payload)
 
     def auth_qr_start(self):
         return self.auth.qr_start()
@@ -6601,8 +6712,11 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         for k, v in headers:
             self.send_header(k, v)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     # ---------- доступ ----------
     @property
@@ -6768,7 +6882,7 @@ class Handler(BaseHTTPRequestHandler):
               '- Связь с колонкой: '+('есть' if getattr(getattr(p, 'conn', None), 'online', False) else 'нет'),
               '- ffmpeg: '+('есть' if getattr(p, 'ffmpeg', None) else 'нет'),
               '- Автопроверка обновлений оригинала: выключена',
-              '\n## Журнал действий без содержимого запросов\n```',JOURNAL.text(150) or 'пусто','```']
+              '\n## Журнал действий без содержимого запросов\n```',redact(JOURNAL.text(150)) or 'пусто','```']
         return {'text':'\n'.join(rows)+'\n'}
 
     def _conn_find(self, start=False):
@@ -6875,7 +6989,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/journal":
             return self._send(200, {"text": JOURNAL.text()})
         if u.path == "/api/log" and parse_qs(u.query).get("name") == ["panel"]:
-            return self._handle(lambda: {"text": JOURNAL.text(parse_qs(u.query).get("lines", [300])[0])})
+            return self._handle(lambda: {"text": JOURNAL.text(max(10, min(5000, int(parse_qs(u.query).get("lines", [300])[0]))))})
         if u.path == "/api/conn/find":
             return self._handle(self._conn_find)
         if u.path == "/api/midi/tests":
@@ -6942,6 +7056,9 @@ class Handler(BaseHTTPRequestHandler):
             if q.get("id") else
                 p.ymusic.lyrics_by_name(q.get("title", ""), q.get("artist", ""), q.get("album"), float(q.get("duration") or 0)),
             "/api/music/queue": p.music_queue,
+            "/api/music/liked": p.music_liked,
+            "/api/music/album": lambda: p.music_album(q.get("id", "")),
+            "/api/music/playlists": p.music_playlists,
             "/api/music/similar": lambda: (p._need_login(), p.ymusic.similar(q.get("id", "")))[1],
             "/api/music/artist": lambda: (p._need_login(), p.ymusic.artist(q.get("id", "")))[1],
             "/api/auth": lambda: {**p.auth.info(), "oauth_url": glagol.OAUTH_URL},
@@ -7048,7 +7165,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/sounds/play-original": lambda: p.sound_overrides.play_original(d.get("name")),
             "/api/scenes": lambda: p.scenes.save(d),
             "/api/scenes/deploy": lambda: p.native_scenes.deploy(),
-            "/api/hook/repair": lambda: (_ for _ in ()).throw(ValueError('Автоматическая правка системного init отключена. Существующий запуск будильника сохраняется.')),
+            "/api/hook/repair": lambda: p.hook_repair(remount=bool(d.get("remount"))),
             "/api/scenes/run": lambda: p.scenes.start_run(d.get("id")),
             "/api/scenes/stop": lambda: p.scenes.cancel(d.get("id")),
             "/api/assistant": lambda: p.assistant_set(d),
@@ -7118,7 +7235,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/zvuk/token": lambda: p.zvuk_token(d.get("token")),
             "/api/music/like": lambda: p.music_like(d["id"], bool(d.get("like", True))),
             "/api/music/dislike": lambda: p.music_dislike(d["id"]),
-            "/api/music/play": lambda: p.music_play(d["id"], d.get("type", "track")),
+            "/api/music/play": lambda: p.music_play(d["id"], d.get("type", "track"), d.get("index"), d),
             "/api/auth/qr": p.auth_qr_start,
             "/api/auth/oauth": lambda: p.auth_oauth(d["url"]),
             "/api/auth/logout": p.auth_logout,
@@ -7224,6 +7341,8 @@ class PanelUpdater:
                 **({"error": err} if err else {})}
 
     def update(self):
+        if self.kind() == "android":
+            raise AdbError("На Android установите новую APK вручную.")
         raise AdbError("Прямое обновление из upstream отключено: оно заменит доработки этой панели. Доступна ручная проверка и выборочный перенос.")
 
     def repair_missing(self):
@@ -7235,7 +7354,46 @@ class PanelUpdater:
         return {"missing": missing}
 
     def _from_zip(self, version):
-        raise AdbError("Замена исходников форка архивом оригинала отключена")
+        files = verified_source_files(version)
+        selected = {}
+        for relative, body in files.items():
+            top = relative.split('/', 1)[0]
+            if relative.startswith('.'):
+                continue
+            if relative not in self.FILES and top not in self.DIRS and not ('/' not in relative and relative.endswith('.py')):
+                continue
+            destination = ROOT / relative
+            if ROOT.resolve() not in destination.resolve().parents or any((ROOT / Path(*Path(relative).parts[:i])).is_symlink() for i in range(1, len(Path(relative).parts) + 1)):
+                raise AdbError('Путь обновления выходит за каталог панели')
+            selected[relative] = body
+        # Keep originals until the whole replacement succeeds.
+        previous = {name: (ROOT / name).read_bytes() if (ROOT / name).exists() else None for name in selected}
+        modes = {name: stat.S_IMODE((ROOT / name).stat().st_mode) for name in selected if (ROOT / name).exists()}
+        written = []
+        try:
+            for name, body in selected.items():
+                destination = ROOT / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                temporary = destination.with_name(destination.name + '.upd')
+                temporary.write_bytes(body)
+                os.replace(temporary, destination)
+                written.append(name)
+                if name in ('start.sh', 'start.command'):
+                    os.chmod(destination, 0o755)
+        except Exception:
+            for name in reversed(written):
+                destination = ROOT / name
+                if previous[name] is None:
+                    destination.unlink(missing_ok=True)
+                else:
+                    destination.write_bytes(previous[name])
+                    os.chmod(destination, modes[name])
+            raise
+        finally:
+            for name in selected:
+                (ROOT / name).with_name(Path(name).name + '.upd').unlink(missing_ok=True)
+
+
 
 
 # Платформа в device-tree (compatible «yandex,plum», модель «Yandex Plum EVT2») → профиль колонки.
@@ -7288,10 +7446,17 @@ def local_networks():
     return nets
 
 
-def find_devices(adb_path, nets):
+def find_devices(adb_path, nets, progress=None):
     """Ищет колонки в подсетях: открытый порт adb 5555, затем проверка платы по device-tree.
-    → [(«ip:5555», профиль, имя хоста)]."""
+    progress(этап, сделано, всего) — для экрана подключения. → [(«ip:5555», профиль, имя хоста)]."""
     from concurrent.futures import ThreadPoolExecutor
+    progress = progress or (lambda *a: None)
+    lock, done = threading.Lock(), [0]
+
+    def tick(stage, total):
+        with lock:
+            done[0] += 1
+            progress(stage, done[0], total)
 
     def port_open(ip):
         try:
@@ -7299,12 +7464,23 @@ def find_devices(adb_path, nets):
             return ip
         except OSError:
             return None
+        finally:
+            tick("ports", len(hosts))
 
     hosts = [str(h) for net in nets for h in net.hosts()]
+    progress("ports", 0, len(hosts))
     with ThreadPoolExecutor(64) as pool:
         candidates = [ip for ip in pool.map(port_open, hosts) if ip]
+    done[0] = 0
+    progress("check", 0, len(candidates))
 
     def check(ip):
+        try:
+            return _check(ip)
+        finally:
+            tick("check", len(candidates))
+
+    def _check(ip):
         serial = f"{ip}:5555"
         try:
             subprocess.run([adb_path, "connect", serial], capture_output=True, timeout=10, **_SUBPROCESS_WINDOW_OPTIONS)

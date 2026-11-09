@@ -22,6 +22,17 @@ def panel(shell):
     return p
 
 
+def static_elf():
+    blob = bytearray(120)
+    blob[:6] = b'\x7fELF\x02\x01'
+    blob[18:20] = (183).to_bytes(2, 'little')
+    blob[32:40] = (64).to_bytes(8, 'little')
+    blob[54:56] = (56).to_bytes(2, 'little')
+    blob[56:58] = (1).to_bytes(2, 'little')
+    blob[64:68] = (1).to_bytes(4, 'little')
+    return bytes(blob)
+
+
 class Detect(unittest.TestCase):
     def test_platforms_like_install_sh(self):
         d = server.Panel.yam2_detect
@@ -145,21 +156,23 @@ class Install(unittest.TestCase):
              "digest": "sha256:" + digest}]}
 
     def test_bad_checksum_never_pushes(self):
-        p = panel(lambda cmd, **kw: ("@\nyandex,plum\n", "", 0))
+        p = panel(lambda cmd, **kw: ("aarch64\n60000\n100000\n", "", 0) if "uname -m" in cmd else ("@\nyandex,plum\n", "", 0))
         p._yam2_releases = lambda refresh=False: [self.release("0" * 64)]
         p._yam2_sums = {}
-        bodies = [io.BytesIO(("0" * 64 + "  yam-aarch64-unknown-linux-musl\n").encode()), io.BytesIO(b"evil")]
+        bodies = [io.BytesIO(("0" * 64 + "  yam-aarch64-unknown-linux-musl\n").encode()), io.BytesIO(static_elf())]
         with patch.object(server.urllib.request, "urlopen", side_effect=bodies):
             with self.assertRaisesRegex(server.AdbError, "контрольная сумма"):
                 p.yam2_install()
         p.adb.push.assert_not_called()
 
     def test_install_pushes_wrapper_like_install_sh(self):
-        blob = b"yam-binary"
+        blob = static_elf()
         digest = hashlib.sha256(blob).hexdigest()
         pushed = {}
 
         def shell(cmd, **kw):
+            if "uname -m" in cmd:
+                return ("aarch64\n60000\n100000\n", "", 0)
             if "YAM_PLATFORM=" in cmd:
                 return ("@\nyandex,plum\n", "", 0)
             if "sha256sum /data/yam/bin/yam.new" in cmd:

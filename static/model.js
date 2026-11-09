@@ -40,7 +40,7 @@ const untested=(tab,what,text)=>{   // what — фраза целиком: «б�
 };
 if(profile.tested_note){
   const p=document.createElement('p');p.className='hint';p.textContent=profile.tested_note;
-  document.querySelector('#hook-warn')?.after(p);
+  document.querySelector('#tab-boot .page-head')?.append(p);
 }
 // На пробу (TRIAL_FEATURES в profiles.py): предупреждение, пока функцию для модели не подтвердили люди (tested)
 const tried=f=>profile.id!=='lite2'&&!(profile.tested||[]).includes(f);   // Лайт 2 — всё проверено, даже если tested не пришёл

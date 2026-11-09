@@ -168,4 +168,5 @@ class LogoRedirects(unittest.TestCase):
         with patch.object(server.Panel, "_public_url", side_effect=lambda u: not u.startswith("http://192.168.")):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 handler.redirect_request(Mock(), None, 302, "Found", {}, "http://192.168.1.1/router.png")
-            caught.exception.close()
+            if caught.exception.fp is not None:
+                caught.exception.close()

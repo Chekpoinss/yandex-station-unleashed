@@ -968,6 +968,8 @@ def bind_panel_music(panel, library):
         with library.lock:
             t = dict(t, favorite=bool(on))
             library.data['tracks'][t['id']] = t
+            if t['id'] in library.remote:
+                library.remote[t['id']]['favorite'] = bool(on)
             library.save()
         return {'liked': bool(on)}
 

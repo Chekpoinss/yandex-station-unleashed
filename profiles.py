@@ -18,7 +18,8 @@ TRIAL_FEATURES = ("assistant", "scenes", "alarm", "anims", "sounds", "say", "yam
 PROFILES = {
     # Лайт первого поколения (PR #6): дисплея нет, кольцо из трёх RGB-диодов micro:*:ring1–3 через /dev/fb0, как у Лайт 2.
     'lite': dict(name='Станция Лайт', platform='yandexmicro', led_prefix='micro', clock=False, boot=False, alarms=False,
-                 light=True, tested=('alarm', 'sounds', 'say', 'assistant')),   # PR #6; #23: «Сказать»; #43: ассистент (Дипсик 4.1 Флеш)
+                 light=True, tested=('alarm', 'sounds', 'say', 'assistant', 'anims'),
+                 tested_note='Анимации кольца подтверждены владельцем на Лайт 1, прошивка 0.369.1.46.4778262442.20261013.297. Сохранение после загрузки требует подключённого хука.'),   # PR #6; #23: «Сказать»; #43: ассистент (Дипсик 4.1 Флеш)
     # Own profile, with general trial functions; no borrowed LED/framebuffer layout.
     'midi': dict(name='Станция Миди', platform='cucumber', clock=False, boot=False,
                  alarms=False, light=False, logo=False, experimental=True,

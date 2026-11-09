@@ -1,4 +1,4 @@
-"""Reversible sound overlays; no root remount, boot hooks, service changes or playback."""
+"""Reversible overlays with validated records for an explicitly installed boot hook."""
 import hashlib
 import json
 import os
@@ -39,7 +39,17 @@ class SoundOverrides:
 
     def owned(self, target, custom):
         q = shlex.quote
-        out, _, rc = self.panel.adb.shell(f"stat -c '%d:%i' {q(target)} {q(custom)}", check=False)
+        # Some station firmware omits BusyBox stat. Compare the backing device
+        # from mounts and ls inode numbers as a fallback, not file contents alone.
+        fallback = (
+            f"for p in {q(target)} {q(custom)}; do "
+            'p=$(readlink -f "$p") || exit 1; '
+            "dev=$(awk -v p=\"$p\" '$2==\"/\" || p==$2 || index(p,$2 \"/\")==1 "
+            "{if(length($2)>=best){best=length($2);dev=$1}} END{print dev}' /proc/mounts); "
+            "ino=$(ls -id \"$p\" 2>/dev/null | awk '{print $1}'); "
+            "[ -n \"$dev\" ] && [ -n \"$ino\" ] || exit 1; printf '%s:%s\n' \"$dev\" \"$ino\"; done")
+        out, _, rc = self.panel.adb.shell(
+            f"stat -c '%d:%i' {q(target)} {q(custom)} 2>/dev/null || {{ {fallback}; }}", check=False)
         values = out.strip().splitlines()
         return rc == 0 and len(values) == 2 and values[0] == values[1]
 
@@ -48,6 +58,27 @@ class SoundOverrides:
         tmp.write_text(json.dumps(self.records, ensure_ascii=False), encoding='utf8')
         os.replace(tmp, self.manifest)
 
+    def boot_record(self, name, record):
+        """Publish a boot record last; the hook verifies the original before binding."""
+        target, base, _ = self.paths(name)
+        q = shlex.quote
+        digest = record['original_sha256']
+        if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+            raise ValueError('Некорректная контрольная сумма оригинала')
+        self.panel.adb.shell(
+            f"printf '%s\n' {q(digest)} > {q(base + '.sha256')} && "
+            f"printf '%s\n' {q(target)} > {q(base + '.target.new')} && "
+            f"mv {q(base + '.target.new')} {q(base + '.target')}")
+
+    def sync_boot_records(self):
+        with self.lock:
+            for name, record in self.records.items():
+                self.boot_record(name, record)
+
+    def persistent(self):
+        status = getattr(self.panel, 'hook_status', None)
+        return bool(status and status().get('hook'))
+
     def status(self):
         with self.lock:
             items = []
@@ -55,8 +86,10 @@ class SoundOverrides:
                 target, base, _ = self.paths(name)
                 mounted = self.mounted(target)
                 items.append({'name': name, 'mounted': mounted, 'owned': mounted and self.owned(target, base + '.custom')})
-            return {'items': items, 'persistent': False, 'ffmpeg': bool(self.panel.ffmpeg),
-                    'note': 'Подмена действует до перезагрузки колонки. Оригиналы сохраняются; автозапуск не изменяется.'}
+            persistent = self.persistent()
+            return {'items': items, 'persistent': persistent, 'ffmpeg': bool(self.panel.ffmpeg),
+                    'note': ('Подмены восстанавливаются хуком после загрузки, если оригинал не изменился.' if persistent else
+                             'Для сохранения после перезагрузки подключите хук в настройках. Оригиналы сохраняются.')}
 
     def _convert(self, original, body):
         return self.panel._audio_like(original, body)
@@ -116,6 +149,7 @@ class SoundOverrides:
             self.panel.adb.shell(f'mv {q(base + ".next")} {q(base + ".custom")}')
             self.records[name] = {'original_sha256': hashlib.sha256(original.read_bytes()).hexdigest()}
             self.save()
+            self.boot_record(name, self.records[name])
             return self.status()
 
     def reset(self, name):
@@ -123,9 +157,11 @@ class SoundOverrides:
             target, base, key = self.paths(name)
             if name not in self.records:
                 raise ValueError('Панель не заменяла этот звук')
-            if self.mounted(target):
-                if not self.owned(target, base + '.custom'):
-                    raise ValueError('Чужое монтирование не изменено')
+            mounted = self.mounted(target)
+            if mounted and not self.owned(target, base + '.custom'):
+                raise ValueError('Чужое монтирование не изменено')
+            self.panel.adb.shell('rm -f ' + shlex.quote(base + '.target'))
+            if mounted:
                 self.panel.adb.shell('umount ' + shlex.quote(target))
             # The original is exposed by unmounting, not overwritten from a backup.
             digest = hashlib.sha256(self.panel.adb.read_bytes(target)).hexdigest()

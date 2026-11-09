@@ -19,8 +19,10 @@ if [ "$platform" = Darwin ]; then
     export PATH
 fi
 
-if ! command -v python3 >/dev/null 2>&1 ||
-   ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
+python_cmd=python3
+[ ! -x .venv/bin/python ] || python_cmd=./.venv/bin/python
+if ! command -v "$python_cmd" >/dev/null 2>&1 ||
+   ! "$python_cmd" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
     echo "Нужен Python 3.9 или новее: https://www.python.org/downloads/"
     if [ "$platform" = Darwin ]; then
         echo "С Homebrew: brew install python"
@@ -29,6 +31,6 @@ if ! command -v python3 >/dev/null 2>&1 ||
 fi
 if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then
     dev="$1"; shift
-    exec python3 server.py --open --device "$dev" "$@"
+    exec "$python_cmd" server.py --open --device "$dev" "$@"
 fi
-exec python3 server.py --open "$@"
+exec "$python_cmd" server.py --open "$@"

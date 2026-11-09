@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Моя станция</string>
+    <string name="channel">Плеер колонки и панель</string>
+    <string name="running">Панель колонки работает в фоне</string>
+    <string name="stop">Остановить</string>
+    <string name="starting">Запуск панели…</string>
+    <string name="saved">Сохранено в «Загрузки»: %1$s</string>
+    <string name="save_failed">Не удалось сохранить файл</string>
+</resources>

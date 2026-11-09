@@ -123,7 +123,9 @@ class SayOnSpeaker(unittest.TestCase):
         pushed = []
         p.adb.push = lambda local, remote, *a, **k: pushed.append((Path(local).read_text(encoding="utf-8"), remote))
         p.say("ужин; rm -rf / $(id)\nвторая строка")
-        self.assertEqual(pushed, [("Повтори за мной: ужин; rm -rf / $(id) вторая строка\n", "/tmp/webpanel_say.txt")])
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], "Повтори за мной: ужин; rm -rf / $(id) вторая строка\n")
+        self.assertRegex(pushed[0][1], r"^/tmp/webpanel_say_[0-9a-f]+\.txt$")
         script = p.detach.call_args.args[1]
         self.assertNotIn("rm -rf", script)
         self.assertIn("maind --cli", script)

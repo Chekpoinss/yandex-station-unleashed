@@ -9,7 +9,7 @@ case "$(uname -m)" in
 esac
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-curl -fsSL --retry 3 "https://ziglang.org/download/0.14.1/zig-$ARCH-linux-0.14.1.tar.xz" -o "$TMP/zig.tar.xz"
+curl -fsSL --connect-timeout 30 --max-time 300 --retry 3 "https://ziglang.org/download/0.14.1/zig-$ARCH-linux-0.14.1.tar.xz" -o "$TMP/zig.tar.xz"
 printf '%s  %s\n' "$SHA" "$TMP/zig.tar.xz" | sha256sum -c -
 mkdir -p "$DEST"
 tar -xJf "$TMP/zig.tar.xz" -C "$DEST" --strip-components=1

@@ -9,6 +9,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def scheduler_helpers(script):
+    # Keep the real locking and one-shot cleanup functions in the shell fixture.
+    return ('CONF_LOCK="$TEST_DIR/conf.lock"; ONCE_GC="$TEST_DIR/once-gc"\n' +
+            script[script.index('conf_lock() {'):script.index('# Громкость Алисы')])
+
+
 class AlarmScheduler(unittest.TestCase):
     def test_alarm_and_scene_use_copied_timezone_across_midnight(self):
         # Issue #37: 22:17 UTC Saturday is 01:17 Sunday in Moscow.
@@ -40,7 +46,7 @@ date() {
 }
 run_id() { echo "alarm:$1" >> "$TEST_DIR/fired"; }
 run_scene() { echo "scene:$1" >> "$TEST_DIR/fired"; }
-''' + scenes + minute + '\ncheck_minute\ncheck_minute\n'
+''' + scheduler_helpers(source) + scenes + minute + '\ncheck_minute\ncheck_minute\n'
                     subprocess.run(['sh', '-c', harness], check=True, timeout=5,
                                    capture_output=True, text=True,
                                    env={**os.environ, 'TEST_DIR': td, 'TEST_EPOCH': str(epoch), 'TZ': timezone})
@@ -59,7 +65,7 @@ date() { case "$1" in +%H:%M) echo 07:30;; +%u) echo 3;; +%Y%m%d%H%M) echo 20261
 run_id() { echo "$1" >> "$TEST_DIR/fired"; }
 check_scenes() { :; }
 check_minute() {
-''' + function + '\ncheck_minute\ncheck_minute\n'
+''' + function + scheduler_helpers(script) + '\ncheck_minute\ncheck_minute\n'
             subprocess.run(['sh', '-c', harness], env={**os.environ, 'TEST_DIR': td},
                            check=True, timeout=5, capture_output=True, text=True)
             self.assertEqual((d / 'fired').read_text().splitlines(), ['b2', 'a1'])

@@ -31,7 +31,7 @@ class AnimationOverrides(SoundOverrides):
         key=hashlib.sha256(name.encode()).hexdigest()
         return self.library.target+'/'+name,self.remote+'/'+key,key
     def _convert(self,original,body):return validate_led(body.decode('utf8')).encode()
-    def status(self):return {'ring':list(self.records),'clock':[],'persistent':False}
+    def status(self):return {'ring':list(self.records),'clock':[],'persistent':self.persistent()}
 
 class AnimationLibrary:
     def __init__(self,panel,server):

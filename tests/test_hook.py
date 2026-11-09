@@ -76,6 +76,23 @@ class RootkeeperHook(unittest.TestCase):
             self.panel._ensure_hook()
         self.assertFalse(self.keeper.exists())
 
+    def test_initd_write_preserves_foreign_file_and_symlink(self):
+        self.initd.chmod(0o755)
+        script = Path(server.INITD_HOOK)
+        original = "#!/bin/sh\necho foreign\n"
+        script.write_text(original)
+        result = subprocess.run(["sh", "-c", server.initd_write()])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(script.read_text(), original)
+        script.unlink()
+        target = self.root / "foreign"
+        target.write_text(original)
+        script.symlink_to(target)
+        result = subprocess.run(["sh", "-c", server.initd_write()])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(script.is_symlink())
+        self.assertEqual(target.read_text(), original)
+
     def test_writable_initd_gets_own_script_when_no_rootkeeper(self):
         # колонка рутована иначе (alicebridge, dropbear): rootkeeper.sh нет, но /etc/init.d можно писать
         self.caller.write_text("echo nothing\n")

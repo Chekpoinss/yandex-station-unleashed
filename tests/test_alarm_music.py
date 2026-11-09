@@ -1,6 +1,7 @@
 import hashlib
 from pathlib import Path
 import shlex
+import shutil
 import tempfile
 import threading
 from types import SimpleNamespace
@@ -12,7 +13,8 @@ from alarm_music import prepare
 
 class AlarmMusicTests(unittest.TestCase):
     def setUp(self):
-        ffmpeg=Path('runtime/ffmpeg.exe').resolve()
+        bundled=Path(__file__).resolve().parents[1]/'runtime'/'ffmpeg.exe'
+        ffmpeg=bundled if bundled.is_file() else Path(shutil.which('ffmpeg') or '')
         if not ffmpeg.is_file():self.skipTest('FFmpeg is required for the real conversion fixture')
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
         self.source=Path(self.temp.name)/'source.wav'

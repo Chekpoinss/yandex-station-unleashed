@@ -84,7 +84,9 @@ class NativeScenes:
                     with tempfile.TemporaryDirectory() as td:
                         f=Path(td)/'ring.led';f.write_text(text,encoding='utf8');p.adb.shell(f'mkdir -p {s.WEB_DIR}/anims/ring');p.adb.push(f,s.WEB_DIR+'/anims/ring/'+name)
         with tempfile.TemporaryDirectory() as td:
-            conf=Path(td)/'scenes';conf.write_text(content,encoding='utf8',newline='\n')
+            conf=Path(td)/'scenes'
+            with conf.open('w', encoding='utf8', newline='\n') as stream:
+                stream.write(content)
             daemon=Path(td)/'alarmd';daemon.write_bytes(s.alarm_script())
             p.adb.push(conf,dest+'.new');p.adb.push(daemon,s.ALARMD+'.new')
             digest=hashlib.sha256(daemon.read_bytes()).hexdigest()
