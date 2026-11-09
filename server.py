@@ -145,8 +145,7 @@ try:
     VERSION = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
 except OSError:
     VERSION = "0.0.0"
-REPO = "Chekpoinss/yandex-station-unleashed"
-UPSTREAM_REPO = "dimap/yapanel-web"
+REPO = "dimap/yapanel-web"
 LED_PREFIX = "plum"
 CLOCK_PATH = None
 
@@ -2947,7 +2946,7 @@ echo @@BLUEZ
         raise AdbError(f"нет программы {what} для колонки: она скачивается с релиза GitHub — проверьте интернет")
 
     def _release_download(self, asset, dest, name):
-        base = f"https://github.com/{UPSTREAM_REPO}/releases/download/v{UPSTREAM_VERSION}/"
+        base = f"https://github.com/{REPO}/releases/download/v{UPSTREAM_VERSION}/"
         get = lambda n, limit: urllib.request.urlopen(urllib.request.Request(
             base + n, headers={"User-Agent": f"yapanel-web/{VERSION}"}), timeout=60).read(limit)
         sums = get("SHA256SUMS", 64 * 1024).decode("utf-8", "replace")

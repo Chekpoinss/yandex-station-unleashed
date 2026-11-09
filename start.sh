@@ -27,25 +27,8 @@ if ! command -v python3 >/dev/null 2>&1 ||
     fi
     exit 1
 fi
-# Изолированные зависимости: запуск работает и без активированного venv.
-if [ ! -x .venv/bin/python ]; then
-    echo "Создаю Python-окружение .venv…"
-    python3 -m venv .venv || {
-        echo "Не удалось создать .venv. Установите поддержку venv для Python."
-        echo "Debian/Ubuntu: sudo apt install python3-venv"
-        echo "Fedora: sudo dnf install python3-pip"
-        exit 1
-    }
-fi
-if ! cmp -s requirements-local.txt .venv/panel-requirements.txt ||
-   ! .venv/bin/python -c 'import mutagen, yt_dlp, tzdata' >/dev/null 2>&1; then
-    echo "Устанавливаю зависимости панели…"
-    .venv/bin/python -m pip install -r requirements-local.txt || exit 1
-    cp requirements-local.txt .venv/panel-requirements.txt || exit 1
-fi
-
 if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then
     dev="$1"; shift
-    exec .venv/bin/python server.py --open --device "$dev" "$@"
+    exec python3 server.py --open --device "$dev" "$@"
 fi
-exec .venv/bin/python server.py --open "$@"
+exec python3 server.py --open "$@"

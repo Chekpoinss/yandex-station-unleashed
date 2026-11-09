@@ -399,7 +399,7 @@ class MusicLights:
         with self.lock:
             self.yield_until = time.monotonic() + 1.
 
-    def native_priority(self, glagol, adb_playing=False):
+    def native_priority(self, glagol):
         """Yield voice/system events and invalidate pipes after native reconnect."""
         connection = getattr(glagol, 'ws', None)
         state = (getattr(glagol, 'state', None) or {})
@@ -411,7 +411,7 @@ class MusicLights:
             self.release()
             self.native_connection = connection
         alice = str(state.get('aliceState', 'IDLE')).upper()
-        if not connection and not adb_playing:
+        if not connection:
             return 'disconnected'
         if alice not in ('IDLE', 'NONE', 'STANDBY', ''):
             return 'alice'
@@ -466,7 +466,7 @@ class MusicLights:
                     position = self.library.position()
                 panel = self.library.panel
                 glagol = getattr(panel, 'glagol', None)
-                priority = self.native_priority(glagol, bool(getattr(self.library, 'adb_audio', None)) and bool(getattr(getattr(panel, 'conn', None), 'online', False)))
+                priority = self.native_priority(glagol)
                 if self.animation and self.animation.get('effect') and priority == 'disconnected':
                     if self.effect_monitor is None:
                         self.effect_monitor = AmbientState(panel.adb)

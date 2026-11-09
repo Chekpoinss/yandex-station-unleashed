@@ -59,14 +59,6 @@ class PanelMusicAdapterTests(unittest.TestCase):
         self.assertEqual(p['extra']['coverURI'], self.track['cover'])
         self.assertTrue(result['glagol']['state']['playing'])
 
-    def test_local_track_reports_adb_connection_without_cloud_login(self):
-        self.panel.glagol = SimpleNamespace(ws=None, state={}, error='cloud unavailable')
-        result = self.panel.music()
-        self.assertFalse(result['auth']['logged_in'])
-        self.assertTrue(result['glagol']['connected'])
-        self.assertTrue(result['glagol']['state']['playing'])
-        self.assertIsNone(result['glagol']['error'])
-
     def test_weather_text_does_not_stop_or_reassign_our_source(self):
         self.panel.music_cmd({'command':'sendText','text':'Какая погода?'})
         self.library.action.assert_not_called()

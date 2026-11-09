@@ -1,8 +1,8 @@
 services:
   panel:
-    image: ghcr.io/chekpoinss/yandex-station-unleashed:latest
-    # --build собирает исходники форка локально:
-    build: .
+    image: ghcr.io/dimap/yapanel-web:latest
+    # или собрать самому из исходников:
+    # build: .
     container_name: yapanel-web
     # host — чтобы сертификат HTTPS выписался на адрес сервера в локальной сети
     network_mode: host
