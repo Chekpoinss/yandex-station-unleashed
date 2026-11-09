@@ -5754,7 +5754,7 @@ echo @@BLUEZ
         p = load_settings().get("music_provider")
         return p if p in ("yandex", "zvuk") else "yandex"
 
-    def music_provider(self, provider=None):
+    def music_provider(self, provider=None, preserve_transport=False):
         if provider is None:
             return {"provider": self._music_provider(), "yandex": bool(self.auth.music_token),
                     "zvuk": bool(self.zvuk.auth.token)}
@@ -5762,20 +5762,30 @@ echo @@BLUEZ
         if provider not in ("yandex", "zvuk"):
             raise AdbError("неизвестный провайдер музыки")
         s = load_settings()
-        s["music_provider"] = provider
-        save_settings(s)
-        # Не оставляем играть прошлого провайдера: переключение должно быть явным.
+        previous = s.get("music_provider", "yandex")
+        if previous == provider:
+            return {"provider": provider}
+        # Complete the transport handoff before publishing the new preference.
+        # A failed stop must be visible and must not leave a false provider state.
         try:
+            if preserve_transport:
+                s["music_provider"] = provider
+                save_settings(s)
+                return {"provider": provider}
             if provider == "zvuk":
                 try:
                     self.zvuk.reset_state()
-                except Exception:  # noqa: BLE001 — состояние могло ещё не создаться
+                except Exception:  # состояние могло ещё не создаться
                     pass
-                self.glagol.send({"command": "stop"})
+                result = self.glagol.send({"command": "stop"})
             else:
-                self.zvuk.stop()
-        except Exception:  # noqa: BLE001 — переключение не должно падать из-за связи
-            pass
+                result = self.zvuk.stop()
+            if isinstance(result, dict) and result.get("status") not in (None, "SUCCESS"):
+                raise AdbError("колонка не подтвердила переключение музыкального источника")
+        except Exception as e:
+            raise AdbError("не удалось переключить источник музыки: " + str(e)) from e
+        s["music_provider"] = provider
+        save_settings(s)
         return {"provider": provider}
 
     def zvuk_state(self):
@@ -5883,23 +5893,32 @@ echo @@BLUEZ
                 return self.glagol.send({"command": "setVolume", "volume": d.get("volume")})
             return self.zvuk.command(d)
         payload = {"command": cmd, **{k: d[k] for k in MUSIC_COMMANDS[cmd] if k in d}}
+        before = (self.glagol.state or {}).get("playerState") or {}
         res = self.glagol.send(payload)
         if cmd == "play":
             # проверка «заиграло ли» — в фоне: ответ кнопке нужен сразу, а не через 4 с
-            threading.Thread(target=self._play_fallback, args=(res,), daemon=True).start()
+            threading.Thread(target=self._play_fallback,
+                             args=(res, str(before.get("id") or ""), self._music_provider()),
+                             daemon=True).start()
         return res
 
-    def _play_fallback(self, res):
+    def _play_fallback(self, res, expected_id="", expected_provider="yandex"):
         """После музыки по Bluetooth облако Алисы помнит Bluetooth последним плеером: «play» (продолжить)
         превращается в bluetooth_player_resume, а телефон уже отключён — в логе Quasar «Media player is not
         initialized», и ничего не играет. Если за 4 с не заиграло, запускаем то же самое заново через playMusic:
         станцию — как станцию, иначе — последний трек."""
         for _ in range(8):
             time.sleep(0.5)
+            if self._music_provider() != expected_provider or expected_provider != "yandex":
+                return res
             if (self.glagol.state or {}).get("playing"):
                 return res
         p = (self.glagol.state or {}).get("playerState") or {}
-        if p.get("playerType") == "bluetooth":
+        # This delayed recovery belongs to the native Yandex transport only.
+        # A local stream or a newer track may have taken ownership meanwhile.
+        if (p.get("playerType") in ("bluetooth", "library") or
+                str(p.get("id") or "").startswith("panel-") or
+                str(p.get("id") or "") != expected_id):
             return res
         pid, ptype = p.get("playlistId") or "", p.get("playlistType")
         if ptype == "Radio" and pid:

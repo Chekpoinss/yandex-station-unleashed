@@ -32,16 +32,22 @@ class PanelMusicAdapterTests(unittest.TestCase):
             ymusic=SimpleNamespace(lyrics_by_name=Mock(return_value={'text': 'Lyrics'})))
         bind_panel_music(self.panel, self.library)
 
-    def test_switching_streaming_provider_releases_local_playback(self):
-        def switch(provider):
-            self.assertFalse(self.library.active)
+    def test_switching_catalogue_provider_keeps_local_transport(self):
+        def switch(provider, **kwargs):
+            self.assertTrue(self.library.active)
+            self.assertTrue(kwargs['preserve_transport'])
             self.assertEqual(provider, 'zvuk')
             return {'provider': provider}
         self.original_provider.side_effect = switch
         self.assertEqual(self.panel.music_provider('zvuk'), {'provider': 'zvuk'})
-        self.library.action.assert_called_once_with({'action': 'stop'})
-        self.assertEqual(self.library.data['music_source'], 'yandex')
-        self.library.save.assert_called_once()
+        self.library.action.assert_not_called()
+        self.assertNotIn('music_source', self.library.data)
+        self.library.save.assert_not_called()
+
+    def test_unknown_cloud_track_id_cannot_take_over_local_queue(self):
+        with self.assertRaisesRegex(ValueError, 'не принадлежит выбранной медиатеке'):
+            self.panel.music_play('cloud-track-id', 'Track')
+        self.original_cmd.assert_not_called()
 
     def test_reading_provider_keeps_local_playback(self):
         self.panel.music_provider()

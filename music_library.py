@@ -458,15 +458,32 @@ class Library:
                     'index': self.cursor, 'generation': getattr(self, 'play_generation', 0)})
             if not self.matches_native(p):
                 if self.phase == 'loading' or str(p.get('id', '')) in getattr(self, 'owned_sessions', ()):
+                    self.foreign_candidate = None
                     return
                 if s.get('playing'):
+                    # Quasar can briefly publish a stale/transition playerState
+                    # while Alice changes tracks. Require the same external
+                    # session twice before relinquishing the panel queue.
+                    ident = str(p.get('id', ''))
+                    if not ident:
+                        return
+                    candidate = getattr(self, 'foreign_candidate', None)
+                    if not candidate or candidate[0] != ident:
+                        self.foreign_candidate = (ident, 1)
+                        return
+                    if candidate[1] < 1:
+                        self.foreign_candidate = (ident, candidate[1] + 1)
+                        return
                     self.offset = self.position()
                     self.phase = 'paused'
                     self.active = False
                     self.media_reason = 'native-source'
                     self.data['music_source'] = 'yandex'
                     self.save()
+                else:
+                    self.foreign_candidate = None
                 return
+            self.foreign_candidate = None
             if self.phase == 'stopped':
                 return
             if self.phase == 'loading':
@@ -879,14 +896,9 @@ def bind_panel_music(panel, library):
     original_provider = getattr(panel, 'music_provider', None)
     if original_provider:
         def music_provider(provider=None):
-            if provider is not None and provider in ('yandex', 'zvuk'):
-                if library.active:
-                    library.action({'action': 'stop'})
-                    with library.lock:
-                        library.active = False
-                        library.data['music_source'] = 'yandex'
-                        library.save()
-            return original_provider(provider)
+            # Provider preference (Yandex/Zvuk) is independent from transport
+            # ownership. Changing the catalogue must not stop a local queue.
+            return original_provider(provider, preserve_transport=bool(library.active))
         panel.music_provider = music_provider
 
     def music_cmd(data):
@@ -984,6 +996,10 @@ def bind_panel_music(panel, library):
         if track(ident):
             library.play(ident)
             return {'status': 'SUCCESS'}
+        if library.active:
+            # Never pass a stale Yandex id to the cloud player while the
+            # library owns transport; it can replace local audio asynchronously.
+            raise ValueError('Трек не принадлежит выбранной медиатеке. Обновите список и повторите выбор.')
         if library.state()['phase'] in ('loading', 'playing', 'paused'):
             library.action({'action': 'stop'})
         library.active = False

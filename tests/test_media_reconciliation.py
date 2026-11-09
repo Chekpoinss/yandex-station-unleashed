@@ -39,10 +39,17 @@ class NativeReconciliationTests(unittest.TestCase):
 
     def test_other_music_never_resumes_library_or_its_lights(self):
         self.event(playing=True, playerState={'id': 'yandex-track', 'progress': 0})
+        self.assertTrue(self.lib.active)  # one stale/mid-transition snapshot is not ownership transfer
+        self.event(playing=True, playerState={'id': 'yandex-track', 'progress': 1})
         self.assertFalse(self.lib.active)
         self.assertEqual(self.lib.phase, 'paused')
         self.assertEqual(self.lib.data['music_source'], 'yandex')
         self.lib.save.assert_called_once()
+
+    def test_changing_foreign_session_resets_handoff_confirmation(self):
+        self.event(playing=True, playerState={'id': 'yandex-track', 'progress': 0})
+        self.event(playing=True, playerState={'id': 'another-track', 'progress': 0})
+        self.assertTrue(self.lib.active)
 
     def test_voice_activity_alone_does_not_resume(self):
         self.lib.phase = 'paused'

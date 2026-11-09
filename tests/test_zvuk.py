@@ -381,6 +381,7 @@ class PlayerTests(unittest.TestCase):
         self.player.playing = True
         self.player.started = time.monotonic() - 10
         self.player.panel.glagol.state = {"playerState": {"title": "Другая песня"}}
+        self.assertFalse(self.player.station_foreign())
         self.assertTrue(self.player.station_foreign())
         self.player.panel.glagol.state = {"playerState": {"title": "наша песня"}}
         self.assertFalse(self.player.station_foreign())
@@ -471,6 +472,29 @@ class RoutingTests(unittest.TestCase):
             self.assertEqual(self.panel.music_provider("zvuk")["provider"], "zvuk")
         self.assertEqual(saved["music_provider"], "zvuk")
         self.assertEqual(sends[0]["command"], "stop")
+
+    def test_provider_preference_can_change_without_stopping_owned_local_transport(self):
+        saved = {}
+        self.panel.auth = SimpleNamespace(music_token="x")
+        self.panel.zvuk = SimpleNamespace(auth=SimpleNamespace(token=""), stop=lambda: self.fail("must preserve transport"))
+        sends = []
+        self.panel.glagol = SimpleNamespace(send=lambda payload, timeout=6: sends.append(payload))
+        with patch.object(server, "load_settings", return_value={}), \
+             patch.object(server, "save_settings", side_effect=lambda d: saved.update(d)):
+            self.assertEqual(self.panel.music_provider("zvuk", preserve_transport=True), {"provider": "zvuk"})
+        self.assertEqual(saved["music_provider"], "zvuk")
+        self.assertEqual(sends, [])
+
+    def test_yandex_fallback_rejects_stale_or_panel_owned_session(self):
+        panel = server.Panel.__new__(server.Panel)
+        sent = []
+        panel.glagol = SimpleNamespace(
+            state={"playing": False, "playerState": {"id": "panel-local-id", "playerType": "track"}},
+            send=lambda payload: sent.append(payload) or {"status": "SUCCESS"})
+        panel._music_provider = lambda: "yandex"
+        with patch.object(server.time, "sleep", return_value=None):
+            panel._play_fallback({}, "panel-local-id", "yandex")
+        self.assertEqual(sent, [])
 
 
 class SourceTests(unittest.TestCase):

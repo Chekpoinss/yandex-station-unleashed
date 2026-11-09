@@ -19,24 +19,81 @@ COMMANDS = {
     'пауза': {'action': 'pause'},
     'поставь на паузу': {'action': 'pause'},
     'поставь музыку на паузу': {'action': 'pause'},
-    'поставь мой плеер на паузу': {'action': 'pause'},
+    'поставь трек на паузу': {'action': 'pause'},
+    'включи паузу': {'action': 'pause'},
+    'пауза музыку': {'action': 'pause'},
+    'останови': {'action': 'pause'},
+    'останови плеер': {'action': 'pause'},
+    'останови трек': {'action': 'pause'},
     'останови музыку': {'action': 'pause'},
+    'выключи музыку': {'action': 'pause'},
+    'выруби музыку': {'action': 'pause'},
+    'отключи музыку': {'action': 'pause'},
+    'поставь мой плеер на паузу': {'action': 'pause'},
+    'сделай паузу': {'action': 'pause'},
+    'приостанови музыку': {'action': 'pause'},
     'продолжай': {'action': 'resume'},
     'продолжи': {'action': 'resume'},
     'продолжай музыку': {'action': 'resume'},
     'продолжи музыку': {'action': 'resume'},
+    'продолжи воспроизведение': {'action': 'resume'},
+    'сними с паузы': {'action': 'resume'},
+    'возобнови': {'action': 'resume'},
+    'возобнови музыку': {'action': 'resume'},
+    'запусти музыку': {'action': 'resume'},
+    'включи музыку': {'action': 'resume'},
+    'играй дальше': {'action': 'resume'},
+    'верни музыку': {'action': 'resume'},
     'следующий трек': {'action': 'next'},
     'следующая песня': {'action': 'next'},
+    'следующий трек включи': {'action': 'next'},
+    'включи следующий трек': {'action': 'next'},
+    'включи следующую песню': {'action': 'next'},
+    'переключи трек': {'action': 'next'},
+    'переключи на следующий трек': {'action': 'next'},
+    'перейди к следующему треку': {'action': 'next'},
     'следующий': {'action': 'next'},
+    'дальше': {'action': 'next'},
+    'дальше трек': {'action': 'next'},
+    'дальше по списку': {'action': 'next'},
+    'следом': {'action': 'next'},
     'предыдущий трек': {'action': 'previous'},
     'предыдущая песня': {'action': 'previous'},
+    'предыдущий трек включи': {'action': 'previous'},
+    'включи предыдущий трек': {'action': 'previous'},
+    'включи предыдущую песню': {'action': 'previous'},
+    'переключи на предыдущий трек': {'action': 'previous'},
+    'перейди к предыдущему треку': {'action': 'previous'},
+    'верни предыдущий трек': {'action': 'previous'},
+    'верни прошлый трек': {'action': 'previous'},
+    'верни назад': {'action': 'previous'},
+    'верни обратно': {'action': 'previous'},
+    'обратно': {'action': 'previous'},
+    'назад': {'action': 'previous'},
     'предыдущий': {'action': 'previous'},
     'включи перемешивание': {'action': 'options', 'shuffle': True},
+    'вруби перемешивание': {'action': 'options', 'shuffle': True},
+    'запусти перемешивание': {'action': 'options', 'shuffle': True},
+    'включи случайный порядок': {'action': 'options', 'shuffle': True},
+    'перемешай треки': {'action': 'options', 'shuffle': True},
+    'перемешай музыку': {'action': 'options', 'shuffle': True},
     'выключи перемешивание': {'action': 'options', 'shuffle': False},
+    'выруби перемешивание': {'action': 'options', 'shuffle': False},
+    'отключи перемешивание': {'action': 'options', 'shuffle': False},
+    'выключи случайный порядок': {'action': 'options', 'shuffle': False},
     'повторяй этот трек': {'action': 'options', 'repeat_mode': 'One'},
     'повторяй эту песню': {'action': 'options', 'repeat_mode': 'One'},
+    'повторяй трек': {'action': 'options', 'repeat_mode': 'One'},
+    'включи повтор трека': {'action': 'options', 'repeat_mode': 'One'},
+    'повторяй текущий трек': {'action': 'options', 'repeat_mode': 'One'},
     'повторяй все треки': {'action': 'options', 'repeat_mode': 'All'},
+    'повторяй весь плейлист': {'action': 'options', 'repeat_mode': 'All'},
+    'включи повтор плейлиста': {'action': 'options', 'repeat_mode': 'All'},
+    'включи повтор': {'action': 'options', 'repeat_mode': 'All'},
     'выключи повтор': {'action': 'options', 'repeat_mode': 'None'},
+    'выруби повтор': {'action': 'options', 'repeat_mode': 'None'},
+    'отключи повтор': {'action': 'options', 'repeat_mode': 'None'},
+    'отключи повтор трека': {'action': 'options', 'repeat_mode': 'None'},
 }
 
 
@@ -146,29 +203,32 @@ class VoiceBridge:
 
     def catalog(self):
         if hasattr(self.library,'voice_catalog'):return self.library.voice_catalog()
-        with self.library.lock:return [self.library.public(t) for t in self.library.data['tracks'].values()]
+        with self.library.lock:return [self.library.public(t) for t in self.library.data.get('tracks',{}).values()]
 
     def command(self, phrase):
         fixed=COMMANDS.get(phrase)
         if fixed:return dict(fixed)
         command=parse_intent(phrase)
         catalog=None
-        if not command and phrase.startswith('включи '):
-            query=phrase[7:].strip()
+        if not command:
+            prefix=next((v for v in ('включи ','запусти ','поставь ','проиграй ','воспроизведи ')
+                         if phrase.startswith(v)),None)
+            query=phrase[len(prefix):].strip() if prefix else ''
             # Explicit music prefixes still allow songs named "Свет". The
             # generic form yields to common smart-home commands instead.
-            if query.split(' ',1)[0] in {'свет','лампу','лампочку','люстру','розетку','телевизор','кондиционер','вентилятор','сценарий'}:
+            if prefix and query.split(' ',1)[0] in {'свет','лампу','лампочку','люстру','розетку','телевизор','кондиционер','вентилятор','сценарий','будильник','таймер'}:
                 return None
-            catalog=self.catalog()
-            for action in ('play_catalog','play_artist'):
-                candidate={'action':action,'query':query}
-                try:select(candidate,catalog)
-                except CatalogError:continue
-                command=candidate
-                break
-        if command and command['action'] in ('play_catalog','play_artist'):
-            try:select(command,catalog if catalog is not None else self.catalog())
-            except CatalogError:return None  # prefer our player only when a match exists
+            if prefix and query:
+                catalog=self.catalog()
+                for action in ('play_catalog','play_artist'):
+                    candidate={'action':action,'query':query}
+                    try:select(candidate,catalog)
+                    except CatalogError:continue
+                    command=candidate
+                    break
+        # Keep explicit local-play intents even if the catalog has no match:
+        # dispatch reports the exact catalog error instead of letting Alice
+        # silently start a cloud track with an unrelated identity.
         return command
 
     def valid(self, job):
@@ -177,10 +237,21 @@ class VoiceBridge:
                      (job.get('direct') or (self.connected and self.latest_request==job['request'] and self.speech_state==0)))
         if not current:return False
         state=self.context()
-        ownership=(not state['protected'] and state['native_id']==job['native_id']) if job.get('claim_source') else (state['active'] and state['matched'])
+        # The panel owns its queue across Quasar's transient playerState changes.
+        # A stale native id must not silently send the command back to Alice.
+        ownership=(not state['protected'] and state['native_id']==job['native_id']) if job.get('claim_source') else (state['active'] and bool(state['track']))
         return (ownership and state['track']==job['track']
                 and state['generation']==job['generation']
                 and state['queue_revision']==job['queue_revision'])
+
+    def expire_pending(self, job):
+        """Report a recognized command when Alice never sends its IDLE event."""
+        with self.lock:
+            if self.pending is not job:
+                return
+            self.pending = None
+            self.cancelled += 1
+            self.error = 'Алиса не завершила голосовой запрос. Повтори команду.'
 
     def receive(self, message, send):
         envelope=fields(message)
@@ -203,11 +274,15 @@ class VoiceBridge:
                 self.pending=None
             if event and command:
                 context=self.context()
-                owned=context['active'] and context['matched'] and context['track']
+                owned=context['active'] and context['track']
                 claim=command['action'] in ('play_catalog','play_artist','search_catalog','search_soundcloud','scene')
                 if not context['protected'] and (owned or claim):
                     self.pending={**context,'request':event['request_id'],
                                   'epoch':self.epoch,'command':dict(command),'claim_source':bool(claim and not owned)}
+                    pending=self.pending
+                    timer=threading.Timer(3.0,self.expire_pending,args=(pending,))
+                    timer.daemon=True
+                    timer.start()
                     # Unlike stopConversation(), Micro cancelDialog has the
                     # silent/request-ID arguments. Always gate current request
                     # locally too; never clear Alice's request queue globally.
@@ -277,7 +352,7 @@ class VoiceBridge:
                 self.executed+=1
                 self.last_action=action
                 self.last_result='found' if tracks else 'not_found'
-                self.error=None
+                self.error=None if tracks else 'По этому запросу ничего не найдено.'
             return
         with lib.control:
             if not self.valid(job):
@@ -291,7 +366,8 @@ class VoiceBridge:
                 aborted[0]=aborted[0] or not valid
                 return valid
             if action=='resume':
-                if context['phase'] in ('playing','loading'):result='already_playing'
+                if context['phase']=='loading':result='loading'
+                elif context['phase']=='playing':result='already_playing'
                 else:lib.play(job['track'],lib.offset if context['phase']=='paused' else 0,_guard=guard)
             elif action in ('next','previous'):
                 available=context['has_previous'] if action=='previous' else context['has_next']
@@ -299,7 +375,10 @@ class VoiceBridge:
                 else:result='no_previous' if action=='previous' else 'no_next'
             elif action in ('play_catalog','play_artist'):
                 catalog=self.catalog()
-                matches=select(job['command'],catalog)
+                try:matches=select(job['command'],catalog)
+                except CatalogError as error:
+                    with self.lock:self.error=str(error)
+                    return
                 if action=='play_artist':lib.play(matches[0]['id'],queue=[t['id'] for t in matches],_guard=guard)
                 else:lib.play(matches[0]['id'],_guard=guard)
             else:lib.action(job['command'])
@@ -319,14 +398,16 @@ class VoiceBridge:
         if not command:return False
         context=self.context()
         claim=command['action'] in ('play_catalog','play_artist','search_catalog','search_soundcloud')
-        if context['protected'] or (not claim and not (context['active'] and context['matched'])):return False
+        if context['protected'] or (not claim and not (context['active'] and context['track'])):return False
         with self.lock:
             self.epoch+=1
             self.pending=None
             self.accepted+=1
             job={**context,'epoch':self.epoch,'request':None,'direct':True,
                  'claim_source':bool(claim),'command':command}
-        self.dispatch(job)
+        try:self.dispatch(job)
+        except CatalogError as error:
+            with self.lock:self.error=str(error)
         return True
 
     def worker(self):
@@ -339,6 +420,11 @@ class VoiceBridge:
                 with self.lock:self.error=str(error)
             except AlarmMusicError as error:
                 with self.lock:self.error=str(error)
+            except ValueError as error:
+                # Source resolvers provide actionable messages for unavailable
+                # tracks (such as SoundCloud DRM). Do not hide them behind the
+                # generic voice-command failure below.
+                with self.lock:self.error=str(error)[:400] or 'Команда не выполнена'
             except Exception:
                 with self.lock:self.error='Не удалось выполнить голосовую команду плеера'
             finally:self.jobs.task_done()

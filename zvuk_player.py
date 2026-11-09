@@ -448,7 +448,17 @@ class ZvukPlayer:
         title = str(p.get("title") or "").strip()
         if not title:
             return False
-        return title.casefold() != str(track.get("title") or "").strip().casefold()
+        if title.casefold() == str(track.get("title") or "").strip().casefold():
+            self.foreign_candidate = None
+            return False
+        # Quasar can briefly expose the next track's metadata while our stream
+        # is still active. Require repeated confirmation before changing source.
+        identity = (str(p.get("id") or ""), title.casefold())
+        with self.lock:
+            if getattr(self, "foreign_candidate", None) != identity:
+                self.foreign_candidate = identity
+                return False
+        return True
 
     def acknowledge_foreign(self):
         """Мы больше не владеем звуком: колонку не трогаем, просто гасим своё состояние."""
@@ -456,6 +466,7 @@ class ZvukPlayer:
             self.playing = False
             self.paused = False
             self.offset = 0.0
+            self.foreign_candidate = None
 
     def reset_state(self):
         """Перед переключением на «Звук»: старое состояние не должно изображать чужой трек."""

@@ -51,6 +51,23 @@ class VoiceBridgeTests(unittest.TestCase):
         bridge.receive(frame(text='какая погода',request_id='new-request',final=False),Mock())
         self.idle(bridge);self.assertTrue(bridge.jobs.empty())
 
+    def test_missing_idle_event_expires_with_visible_error_without_touching_new_command(self):
+        bridge,lib=self.bridge()
+        timers=[]
+        class Timer:
+            def __init__(self, delay, callback, args):self.callback,self.args=callback,args
+            def start(self):timers.append(self)
+        with patch('voice_bridge.threading.Timer',Timer):
+            bridge.receive(frame(text='пауза'),Mock())
+            first=bridge.pending
+            bridge.receive(frame(text='следующий трек',request_id='second'),Mock())
+            second=bridge.pending
+            timers[0].callback(*timers[0].args)
+            self.assertIs(bridge.pending,second)  # old timer must not expire the newer request
+            timers[1].callback(*timers[1].args)
+        self.assertIsNone(bridge.pending)
+        self.assertIn('не завершила',bridge.error)
+
     def test_disable_or_track_generation_change_rejects_queued_command(self):
         for change in ('disable','generation','source','listening','queue_revision'):
             with self.subTest(change=change):
@@ -76,7 +93,8 @@ class VoiceBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.executed,0);self.assertEqual(bridge.cancelled,1)
 
     def test_next_previous_and_options_route_to_shared_player(self):
-        for text,expected in (('следующий трек','next'),('предыдущий трек','previous'),
+        for text,expected in (('следующий трек','next'),('дальше','next'),
+                              ('дальше по списку','next'),('предыдущий трек','previous'),
                               ('включи перемешивание','options'),('повторяй этот трек','options')):
             with self.subTest(text=text):
                 bridge,lib=self.bridge();send=Mock()
@@ -84,6 +102,24 @@ class VoiceBridgeTests(unittest.TestCase):
                 bridge.dispatch(bridge.jobs.get_nowait());send.assert_called_once()
                 if expected=='options':self.assertEqual(lib.action.call_args.args[0]['action'],'options')
                 else:self.assertEqual(lib.advance.call_args.kwargs['previous'],expected=='previous')
+
+    def test_natural_language_aliases_cover_all_transport_controls(self):
+        expected={
+            'обратно':('previous',None),'верни назад':('previous',None),'назад':('previous',None),
+            'включи следующий трек':('next',None),'перейди к следующему треку':('next',None),
+            'сними с паузы':('resume',None),'возобнови музыку':('resume',None),
+            'выруби музыку':('pause',None),'отключи музыку':('pause',None),
+            'вруби перемешивание':('options',True),'отключи перемешивание':('options',False),
+            'включи повтор':('options','All'),'включи повтор трека':('options','One'),
+            'выруби повтор':('options','None'),'отключи повтор':('options','None'),
+        }
+        for phrase,(action,value) in expected.items():
+            with self.subTest(phrase=phrase):
+                command=VoiceBridge.command(self,phrase)
+                self.assertEqual(command['action'],action)
+                if action=='options':
+                    if isinstance(value,bool):self.assertEqual(command['shuffle'],value)
+                    else:self.assertEqual(command['repeat_mode'],value)
 
     def test_bad_config_and_failed_save_never_enable_listener(self):
         bridge,lib=self.bridge();bridge.configure({'enabled':False})
@@ -127,7 +163,7 @@ class VoiceBridgeTests(unittest.TestCase):
                 send=Mock();bridge.receive(frame(text='продолжай'),send);self.idle(bridge)
                 bridge.dispatch(bridge.jobs.get_nowait())
                 send.assert_called_once();lib.play.assert_not_called()
-                self.assertEqual(bridge.last_result,'already_playing')
+                self.assertEqual(bridge.last_result,'loading' if phase=='loading' else 'already_playing')
 
     def test_pause_during_owned_loading_is_delivered_to_shared_transport(self):
         bridge,lib=self.bridge();self.state['phase']='loading'
@@ -162,6 +198,38 @@ class VoiceBridgeTests(unittest.TestCase):
         bridge.dispatch(bridge.jobs.get_nowait())
         send.assert_called_once();self.assertEqual(lib.play.call_args.args,('b',))
         self.assertTrue(callable(lib.play.call_args.kwargs['_guard']))
+
+    def test_partial_title_found_in_search_can_be_started_by_voice(self):
+        bridge,lib=self.bridge();self.catalog(lib);send=Mock()
+        bridge.receive(frame(text='запусти second'),send);self.idle(bridge)
+        bridge.dispatch(bridge.jobs.get_nowait())
+        send.assert_called_once();self.assertEqual(lib.play.call_args.args[0],'b')
+
+    def test_english_title_one_letter_recognition_error_still_routes_to_panel(self):
+        bridge,lib=self.bridge();send=Mock()
+        lib.data['tracks']={'impostor':{'id':'impostor','title':'Impostor Syndrome','artist':'Sidney Gish'}}
+        lib.public=lambda track:dict(track)
+        bridge.receive(frame(text='включи imposter syndrome'),send);self.idle(bridge)
+        bridge.dispatch(bridge.jobs.get_nowait())
+        send.assert_called_once();self.assertEqual(lib.play.call_args.args[0],'impostor')
+
+    def test_worker_surfaces_actionable_stream_error(self):
+        bridge,lib=self.bridge();self.catalog(lib)
+        lib.play.side_effect=ValueError('Этот поток защищён DRM')
+        bridge.receive(frame(text='включи трек second song'),Mock());self.idle(bridge)
+        worker=threading.Thread(target=bridge.worker,daemon=True);worker.start()
+        bridge.jobs.join()
+        bridge.close();worker.join(timeout=1)
+        self.assertEqual(bridge.error,'Этот поток защищён DRM')
+
+    def test_explicit_missing_local_track_is_claimed_and_shows_error_instead_of_cloud_fallback(self):
+        bridge,lib=self.bridge();self.catalog(lib)
+        send=Mock()
+        bridge.receive(frame(text='включи трек not in library'),send);self.idle(bridge)
+        bridge.dispatch(bridge.jobs.get_nowait())
+        send.assert_called_once()
+        lib.play.assert_not_called()
+        self.assertIn('названия в медиатеке нет',bridge.error)
 
     def test_play_artist_builds_queue_across_local_and_soundcloud(self):
         bridge,lib=self.bridge();self.catalog(lib)
