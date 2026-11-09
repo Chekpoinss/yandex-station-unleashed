@@ -13,8 +13,9 @@ jobs:
   python:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-24.04]
         python: ['3.9', '3.14']
         include:
           - os: macos-latest
@@ -52,7 +53,7 @@ jobs:
           go -C device/viz test ./...
 
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

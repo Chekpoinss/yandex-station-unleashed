@@ -7627,7 +7627,17 @@ def save_settings(d):
         pass
 
 
+def configure_console():
+    """Configure Unicode before argparse can print help, including redirected Windows output."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    configure_console()
     env = os.environ.get
     import profiles
     ap = argparse.ArgumentParser(description="Веб-панель для Яндекс Станций")
@@ -7646,11 +7656,6 @@ def main():
     ap.add_argument("--model", choices=[*profiles.PROFILES, "auto"], default=env("PANEL_MODEL", "auto"),
                     help="профиль колонки: lite2, lite, mini3pro, mini3, mini2, station2, midi или auto — определить по плате [PANEL_MODEL]")
     args = ap.parse_args()
-    for stream in (sys.stdout, sys.stderr):   # консоль Windows: русский текст не должен ронять сервер
-        try:
-            stream.reconfigure(errors="replace", line_buffering=True)
-        except (AttributeError, ValueError):
-            pass
     if args.data_dir:
         set_data_dir(args.data_dir)
 

@@ -210,6 +210,7 @@ def restart_workers(workers):
 
 
 def main():
+    server.configure_console()
     parser=argparse.ArgumentParser(description='One console for several rooted Yandex speakers')
     parser.add_argument('--config',required=True,help='JSON speaker list; see speakers.example.json')
     parser.add_argument('--data-dir',type=Path,default=ROOT/'data/multi')
