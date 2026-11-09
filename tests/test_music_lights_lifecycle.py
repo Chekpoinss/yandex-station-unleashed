@@ -53,6 +53,13 @@ class LedLifecycleTests(unittest.TestCase):
         old.stdin.close.assert_called_once()
         new.stdin.write.assert_called_once()
 
+    def test_adb_audio_does_not_require_cloud_connection_for_lights(self):
+        self.g.ws = None
+        self.g.state['aliceState'] = 'IDLE'
+        self.assertIsNone(self.led.native_priority(self.g, adb_playing=True))
+        self.g.state['aliceState'] = 'LISTENING'
+        self.assertEqual(self.led.native_priority(self.g, adb_playing=True), 'alice')
+
     def test_voice_and_connection_have_priority(self):
         self.g.state['aliceState'] = 'LISTENING'
         self.assertEqual(self.led.native_priority(self.g), 'alice')

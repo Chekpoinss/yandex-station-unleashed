@@ -970,6 +970,8 @@
   .lyrics .ln { display: block; opacity: .45; transition: opacity .28s ease, font-size .32s ease; }
   .lyrics .ln.cur { opacity: 1; font-weight: 700; font-size: 1.2em; }
   /* провайдеры музыки: Яндекс или Сбер Звук */
+  body[data-music-source="library"] #pl-zvuk,
+  body[data-music-source="library"] #zvuk-artist-card { display: none !important; }
   #pl-zvuk { display: none; }
   body[data-provider="zvuk"] #pl-zvuk { display: flex; }
   /* у «Звука» текст песни остаётся справа от плеера, а под ним — свои блоки */
@@ -4766,9 +4768,10 @@ function renderMusic() {
   ymLogin = logged ? i.auth.login || '' : '';
   const account = $('#mu-account');
   if (account.dataset.login !== ymLogin) { account.dataset.login = ymLogin; account.innerHTML = ymLogin ? secret('login', ymLogin) : ''; }
-  $('#pl-login').hidden = logged;
-  $('#pl-body').hidden = !logged;
-  if (!logged) { if (!mu.qr && !$('#tab-overview').hidden) startQr(); return; }
+  document.body.dataset.musicSource = isLocal ? 'library' : 'cloud';
+  $('#pl-login').hidden = playable;
+  $('#pl-body').hidden = !playable;
+  if (!playable) { if (!mu.qr && !$('#tab-overview').hidden) startQr(); return; }
   stopQr();
 
   const g = i.glagol, s = g.state, p = s?.playerState, has = muHas();
@@ -4779,7 +4782,7 @@ function renderMusic() {
   $('#mu-err').textContent = g.connected ? '' : (g.error || 'Подключаемся к колонке…');
   const title = has ? p.title : 'Ничего не играет';
   const wave = musicProvider === 'zvuk' ? 'Мой поток' : 'Моя волна';
-  const artist = has ? (p.subtitle || '') + (isBt && p.extra?.album ? ' — ' + p.extra.album : '') : (g.connected ? `Нажмите ▶ — включится «${wave}»` : '');
+  const artist = has ? (p.subtitle || '') + (isBt && p.extra?.album ? ' — ' + p.extra.album : '') : (isLocal ? 'Добавьте файл и нажмите на трек в медиатеке' : g.connected ? `Нажмите ▶ — включится «${wave}»` : '');
   // В виджете и на вкладке «Плеер» название и исполнители — ссылки на Яндекс Музыку (нижний плеер ведёт во вкладку).
   const t = !isBt && mu.track && mu.track.id === String(p?.id) ? mu.track : null;
   const links = !plMobile();   // на телефоне ссылок наружу нет: исполнитель открывает «Об исполнителе»
@@ -8423,6 +8426,8 @@ async function loadHook() {
 }
 function renderHook() {
   const w = $('#hook-warn'), h = hookInfo;
+  const settings = $('#tab-settings');
+  if (w.parentElement !== settings) settings.append(w);
   w.hidden = !h || !(h.broken || h.setup_required);
   if (w.hidden) return;
   const what = h.users.join(', ');
@@ -8440,8 +8445,7 @@ function renderHook() {
   }
   if (h.supported === false) $('#hook-warn-text').textContent = h.reason || 'Автозапуск для этой модели пока не поддерживается';
   $('#hook-repair').textContent = h.hook ? 'Обновить хук' : 'Подключить хук';
-  const head = $('main[data-page]:not([hidden]) .page-head');
-  if (head && w.parentElement !== head) head.append(w);
+
 }
 $('#hook-repair').onclick = e => {
   if (hookInfo?.supported === false) return toast(hookInfo.reason, true);

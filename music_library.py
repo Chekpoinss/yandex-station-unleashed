@@ -508,6 +508,10 @@ class Library:
                 self.media_reason = 'native-ended'
 
     def kill(self):
+        offline = getattr(self, 'adb_audio', None)
+        if offline is not None:
+            self.adb_audio = None
+            offline.close()
         if self.native_audio:
             self.panel.glagol.send({'command': 'stop'})
         self.panel.adb.shell("p=/tmp/lane_music.pid; if [ -s $p ]; then n=$(cat $p); "
@@ -540,7 +544,8 @@ class Library:
                     candidate.revision = old.revision + 1
                 else:
                     candidate.select(ident)
-            if not getattr(self.panel, 'glagol', None) or not self.panel.glagol.ws:
+            offline = t.get('source') == 'local' and not (getattr(self.panel, 'glagol', None) and self.panel.glagol.ws)
+            if not offline and (not getattr(self.panel, 'glagol', None) or not self.panel.glagol.ws):
                 raise ValueError('Нет подключения к штатному плееру. Дождитесь соединения с Яндексом в панели.')
             source, proxied = self.resolve(t)
             # Voice resolution can outlive its request (especially SoundCloud).
@@ -580,6 +585,26 @@ class Library:
                 self.order = candidate
                 self._sync_order()
                 url = f'http://{self.host}:{self.port}/{self.token}/{self.play_token}.mp3'
+            if offline:
+                from audio_stream import AdbPcmPlayer
+                if not self.panel.ffmpeg:
+                    self.phase = 'stopped'
+                    raise ValueError('Для локальной музыки установите FFmpeg на компьютере')
+                pcm = self.root / ('.lights-' + self.play_token + '.pcm')
+                self.native_audio = False
+                try:
+                    self.adb_audio = AdbPcmPlayer(self.panel.adb, self.panel.ffmpeg, source, self.offset, pcm, t.get('duration', 0))
+                    lights = getattr(self, 'lights', None)
+                    if lights:
+                        lights.attach(pcm, self.play_token, self.offset)
+                    self.started = time.monotonic()
+                    self.stream_ready = True
+                    self.phase = 'playing'
+                    self.media_reason = 'adb-playing'
+                except Exception:
+                    self.phase = 'stopped'
+                    raise
+                return self.state()
             if not self.panel.glagol.ws:
                 self.phase = 'stopped'
                 raise ValueError('Нет подключения к штатному плееру. Дождитесь соединения с Яндексом в панели.')
@@ -679,6 +704,19 @@ class Library:
         """Serialize end-of-track handling with UI control; consume one event once."""
         with self.control:
             self.reconcile_native()
+            offline = getattr(self, 'adb_audio', None)
+            if offline is not None:
+                result = offline.poll()
+                if result is not None:
+                    if result:
+                        self.error = offline.error()
+                        self.kill()
+                        self.phase = 'stopped'
+                        return
+                    self.adb_audio = None
+                    offline.close()
+                    self.native_ended = True
+                    self.media_reason = 'adb-ended'
             alarm=bool(getattr(getattr(self.panel,'metrics',None),'ringing',None))
             if alarm and self.active and self.phase in ('playing','loading'):
                 self.action({'action':'pause'})
@@ -869,12 +907,13 @@ def bind_panel_music(panel, library):
                                      'queueRevision': state.get('queue_revision', 0)}}
         now = time.time()
         g = getattr(panel, 'glagol', None)
-        connected = panel.conn.online and (bool(g.ws) if g else True)
+        local_track = bool(t and t.get('source') == 'local')
+        connected = panel.conn.online and (local_track or (bool(g.ws) if g else True))
         native_volume = (g.state or {}).get('volume') if g else None
         if isinstance(native_volume, (int, float)):
             volume[0] = native_volume
         return {'auth': panel.auth.info(), 'source': 'library', 'library_available': True, 'server_time': now,
-                'library': state, 'glagol': {'connected': connected, 'error': state['error'] or (g.error if g else None),
+                'library': state, 'glagol': {'connected': connected, 'error': state['error'] or (g.error if g and not local_track else None),
                     'updated': now, 'progress_at': now,
                     'state': {'playing': connected and state['phase'] == 'playing', 'volume': volume[0],
                               'playerState': player}}}
