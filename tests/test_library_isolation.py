@@ -25,3 +25,20 @@ class LibraryIsolationTests(unittest.TestCase):
                 self.assertNotEqual(first.port,second.port)
                 self.assertTrue(all(call.args[0][1]==0 for call in http.call_args_list))
                 self.assertEqual(json.loads(second.index.read_text('utf8'))['tracks'],{})
+
+    def test_first_launch_without_speaker_or_network(self):
+        for serial in (None, '', 'usb-serial'):
+            with self.subTest(serial=serial), tempfile.TemporaryDirectory() as td:
+                panel = SimpleNamespace(data_dir=Path(td),
+                    glagol=SimpleNamespace(state_callbacks=[]), ymusic=Mock(),
+                    adb=SimpleNamespace(serial=serial))
+                with patch.object(music_library.socket, 'socket') as sock, \
+                     patch.object(music_library, 'ThreadingHTTPServer') as http, \
+                     patch.object(music_library.threading, 'Thread'), \
+                     patch('music_artwork.ArtworkWorker'):
+                    sock.return_value.connect.side_effect = OSError('network unavailable')
+                    http.return_value.server_address = ('127.0.0.1', 8767)
+                    library = music_library.Library(panel)
+                    self.assertEqual(library.host, '127.0.0.1')
+                    http.assert_called_once()
+                    sock.return_value.close.assert_called_once()

@@ -29,7 +29,7 @@
 
 > Скриншоты сняты с интерфейса этой версии на демонстрационных данных. Треки, показатели и сценарии — примеры; личные данные владельца не используются.
 
-Неофициальный форк **[dimap/yandex-station-web](https://github.com/dimap/yandex-station-web)** от **[Chekpoinss](https://github.com/Chekpoinss)**. Сохранена основа оригинала и добавлены собственная библиотека, SoundCloud, светомузыка и отдельный профиль Станции Лайт первого поколения. Основа обновлена до upstream v0.3.0, собственные функции форка сохранены.
+Неофициальный форк **[dimap/yapanel-web](https://github.com/dimap/yapanel-web)** от **[Chekpoinss](https://github.com/Chekpoinss)**. Сохранена основа оригинала и добавлены собственная библиотека, SoundCloud, светомузыка и отдельный профиль Станции Лайт первого поколения. Основа обновлена до upstream v0.3.0, собственные функции форка сохранены.
 
 ## Возможности
 
@@ -69,14 +69,30 @@
 
 ### Linux / macOS
 
-Установите Python, adb и FFmpeg. Из папки проекта:
+Установите Python, adb и FFmpeg. Для Fedora:
 
 ```sh
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-local.txt
-python server.py --device <IP_КОЛОНКИ> --model lite1 --open
+sudo dnf install python3 python3-pip android-tools ffmpeg-free openssl
 ```
+
+Для Debian / Ubuntu:
+
+```sh
+sudo apt install python3 python3-venv adb ffmpeg openssl
+```
+
+Из папки проекта запустите:
+
+```sh
+./start.sh
+# Или сразу с адресом и моделью колонки:
+./start.sh <IP_КОЛОНКИ> --model lite1
+```
+
+Скрипт создаёт `.venv`, устанавливает зависимости и открывает браузер. При следующих
+запусках используется это же окружение; после изменения `requirements-local.txt`
+зависимости обновляются автоматически. Системный Python не изменяется.
+На macOS после установки Python, adb и FFmpeg через Homebrew можно также запускать `start.command`.
 
 `lite1` — Лайт первого поколения. Для другой модели выберите её профиль или `auto`. Аргументы: `python server.py --help`.
 
@@ -140,7 +156,7 @@ node tests/test_catalog.cjs
 
 ## Авторы и лицензии
 
-Основа — **[dimap/yandex-station-web](https://github.com/dimap/yandex-station-web)**. Поддержка моделей и нескольких колонок в оригинале — вклад **[chelaxian](https://github.com/chelaxian)**. Собственные дополнения форка — **[Chekpoinss](https://github.com/Chekpoinss)**.
+Основа — **[dimap/yapanel-web](https://github.com/dimap/yapanel-web)**. Поддержка моделей и нескольких колонок в оригинале — вклад **[chelaxian](https://github.com/chelaxian)**. Собственные дополнения форка — **[Chekpoinss](https://github.com/Chekpoinss)**.
 
 - Код панели — [MIT](LICENSE), исходное уведомление об авторских правах сохранено.
 - STL Лайт 2 — [модель vanyabeat](https://www.thingiverse.com/thing:7349611), **CC BY-SA 4.0**. Атрибуция моделей: [static/models/SOURCES.md](static/models/SOURCES.md).
@@ -151,6 +167,6 @@ node tests/test_catalog.cjs
 
 ## Обновление основы до 0.3.0
 
-Объединено с оригинальной панелью до коммита [487a458](https://github.com/dimap/yandex-station-web/commit/487a45857b742d326c7c673c88f0eb6b8543d5cd). Добавлены сервис «Звук», прямой голосовой ввод и realtime-режим ассистента, обновлён интерфейс и исправления соединения. Доступность функций зависит от модели колонки и настроенных сервисов.
+Объединено с оригинальной панелью до коммита [487a458](https://github.com/dimap/yapanel-web/commit/487a45857b742d326c7c673c88f0eb6b8543d5cd). Добавлены сервис «Звук», прямой голосовой ввод и realtime-режим ассистента, обновлён интерфейс и исправления соединения. Доступность функций зависит от модели колонки и настроенных сервисов.
 
 Сохранены медиатека форка, вкладка «Умный дом», эффекты подсветки с режимом «Пока не выключу», сценарии и ручная смена адреса. Личные токены, настройки и журналы хранятся локально и исключены из репозитория.

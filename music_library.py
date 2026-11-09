@@ -114,11 +114,14 @@ class Library:
         self.proxy = os.environ.get('MUSIC_PROXY') or proxies.get('https') or proxies.get('http') or ''
         from yandex_library import YandexLibrary
         self.yandex = YandexLibrary(panel.ymusic)
-        speaker = panel.adb.serial.split(':')[0]
+        speaker = (panel.adb.serial or '').split(':')[0] or '192.168.0.1'
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             sock.connect((speaker, 5555))
             self.host = sock.getsockname()[0]
+        except OSError:
+            # Первый запуск без сети/адреса колонки: интерфейс должен открыться.
+            self.host = '127.0.0.1'
         finally:
             sock.close()
         self.port = 0 if os.environ.get('PANEL_GATEWAY_SECRET') else 8767
