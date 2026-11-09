@@ -3020,7 +3020,9 @@ echo @@BLUEZ
             bundled = ""
         if build.exists() and bundled == UPSTREAM_VERSION:
             return build
-        cached = DATA_DIR / f".{name}-{VERSION}"
+        # These downloaded device helpers belong to the upstream panel build,
+        # not the fork's release number. Keep the cache keyed to their source.
+        cached = DATA_DIR / f".{name}-{UPSTREAM_VERSION}"
         if cached.exists():
             return cached
         if download:
